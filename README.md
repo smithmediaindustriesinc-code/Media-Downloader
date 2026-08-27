@@ -110,6 +110,37 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.5.4
+
+Bug fixes:
+- **URL Scraping "browser component" install loop.** The Playwright/Chromium
+  install could fail silently and leave the app re-prompting the same popup
+  forever (and a manual `playwright install` was invisible to it). Chromium
+  now installs to, and loads from, a per-user app-owned folder
+  (`%APPDATA%\Media Downloader\playwright-browsers`), the install runs with a
+  hidden console and its result is verified before the app reports success,
+  and a still-missing browser shows a plain error instead of looping.
+- **"Remember maximized" now works.** Closing while maximized is remembered
+  and a "Remembered" launch restores a true maximized window (it used to
+  reopen as a plain floating window at maximized size).
+
+Appearance / behavior:
+- Launches maximized by default; any non-maximized launch is centered on
+  screen.
+- The startup logo animation now loops (grow → hold → shrink → hold → repeat).
+- "URL Scraping" is the first and default sub-tab of the More tab.
+- The dynamic batch-queue URL input is on by default.
+- Enter now triggers the adjacent action for text+button fields that aren't
+  downloads (Fetch info, Scrape, dev login, the search boxes).
+- The default download folder is automatically a Media Library folder.
+- The Media Library search box no longer squishes the controls beside it.
+
+Build:
+- `build_exe.bat` is now double-click-safe (runs from its own folder,
+  auto-detects Python, bundles the customtkinter themes + the Playwright
+  package). `installer.iss` warnings cleared; the post-install browser
+  download runs as the real user.
+
 ### 1.5.3
 
 Bug fixes:
