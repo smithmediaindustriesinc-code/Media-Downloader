@@ -8,10 +8,33 @@ are found, fetching their real titles via yt-dlp is a SEPARATE step
 (fetch_titles_for_urls) - matching exactly how this was asked for:
 scrape first, fetch names second, only THEN show anything to the user.
 """
+import os
 import re
 import subprocess
 import sys
 from urllib.parse import urljoin
+
+from core.paths import app_dir
+
+
+def _browsers_dir():
+    """Per-user, app-owned location for Playwright's browser downloads -
+    isolated from any system-wide or other-Python-version Playwright
+    install (a revision mismatch there was a real cause of "installed but
+    still won't launch"), and writable without admin rights, the same way
+    this app already handles its FFmpeg download."""
+    path = os.path.join(app_dir(), "playwright-browsers")
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+# Pin the browser location before Playwright is imported anywhere below.
+# setdefault so an explicit PLAYWRIGHT_BROWSERS_PATH (installer / environment)
+# still wins.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _browsers_dir())
 
 VIDEO_EXTENSIONS_RE = re.compile(r"\.(mp4|webm|mov|avi|mkv|flv|wmv|m3u8|mpd)(\?|$)", re.IGNORECASE)
 AUDIO_EXTENSIONS_RE = re.compile(r"\.(mp3|wav|m4a|ogg|flac|aac|opus)(\?|$)", re.IGNORECASE)
@@ -147,40 +170,61 @@ def ensure_playwright_browser_installed():
     installer is idempotent and skips anything already downloaded.
     Returns (ok, message).
 
-    Calls Playwright's own public playwright.__main__.main() entry
-    point directly, IN-PROCESS - not by spawning
-    `sys.executable -m playwright install chromium` as a subprocess.
-    That subprocess approach was the actual, confirmed bug behind
-    "the executable is not found": it works fine when running from
-    source (sys.executable is a real python.exe that understands -m),
-    but in the PACKAGED app, sys.executable is the app's own compiled
-    .exe, which doesn't understand -m module-invocation syntax at all -
-    it just receives ["-m", "playwright", "install", "chromium"] as
-    plain arguments that don't match any of this app's own recognized
-    flags, so it silently launched a second copy of the whole GUI app
-    and did nothing useful. The browser was NEVER actually being
-    downloaded for anyone using the real packaged app. Calling
-    Playwright's install logic as a normal in-process function call
-    instead sidesteps this entirely - it works identically regardless
-    of whether the calling process is frozen or not, since it never
-    depends on -m/sys.executable semantics."""
-    import sys as _sys
-    from playwright.__main__ import main as playwright_main
+    Runs Playwright's own bundled driver directly via subprocess, with a
+    HIDDEN window (CREATE_NO_WINDOW) and captured output - not the
+    in-process playwright.__main__.main(), which in a windowed frozen
+    build flashed a stray console and surfaced no usable error. It then
+    VERIFIES Chromium is actually launchable before reporting success, so
+    a silent no-op install can never leave the URL Scraping tab stuck
+    re-prompting forever (the earlier symptom).
 
-    original_argv = _sys.argv
+    An earlier approach spawned `sys.executable -m playwright install` as
+    a subprocess - broken in the packaged app because sys.executable is
+    the app's own .exe, which doesn't understand -m and just relaunched
+    the GUI. This calls the real driver node/exe directly instead, so it
+    works identically frozen or from source."""
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _browsers_dir())
+
+    ok, _ = _chromium_available()
+    if ok:
+        return True, "Playwright's Chromium browser is already installed."
+
     try:
-        _sys.argv = ["playwright", "install", "chromium"]
-        try:
-            playwright_main()
-        except SystemExit as e:
-            # playwright_main() calls sys.exit() on completion (success
-            # AND failure both raise SystemExit - that's just how its
-            # own CLI entry point signals its result code, not
-            # necessarily an error).
-            if e.code not in (None, 0):
-                return False, f"playwright install exited with code {e.code}."
-        return True, "Playwright's Chromium browser is installed and ready for URL Scraping."
+        from playwright._impl._driver import compute_driver_executable, get_driver_env
     except Exception as e:
-        return False, f"Could not run the Playwright install step: {e}"
-    finally:
-        _sys.argv = original_argv
+        return False, f"Playwright isn't available in this build ({e})."
+
+    driver = compute_driver_executable()
+    cmd = (list(driver) if isinstance(driver, (list, tuple)) else [driver]) + ["install", "chromium"]
+    env = get_driver_env()
+    env.setdefault("PLAYWRIGHT_BROWSERS_PATH", _browsers_dir())
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(cmd, env=env, creationflags=creationflags,
+                                 capture_output=True, text=True, timeout=1800)
+    except Exception as e:
+        return False, f"Could not run the Playwright browser download: {e}"
+
+    if result.returncode != 0:
+        tail = ((result.stdout or "") + (result.stderr or "")).strip()[-800:]
+        return False, (f"The browser download failed (exit code {result.returncode}). "
+                        f"Check your internet connection and try again.\n\n{tail}")
+
+    ok, why = _chromium_available()
+    if ok:
+        return True, "Playwright's Chromium browser is installed and ready for URL Scraping."
+    return False, (f"The download finished but Chromium still isn't usable ({why}). "
+                    f"Try again, or restart the app and retry.")
+
+
+def _chromium_available():
+    """(ok, detail): is Playwright's Chromium actually present and
+    launchable right now? Resolves the real executable path and checks it
+    exists on disk - never trusts an install command's exit code alone."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            path = p.chromium.executable_path
+        return (bool(path) and os.path.exists(path)), (path or "no executable path resolved")
+    except Exception as e:
+        return False, str(e)

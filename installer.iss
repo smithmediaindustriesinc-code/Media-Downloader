@@ -44,7 +44,7 @@ OutputDir=installer_output
 OutputBaseFilename=MediaDownloaderSetup
 Compression=lzma2/max
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=installer_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
@@ -100,9 +100,14 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 ; hidden) with its own status text since a several-hundred-MB browser
 ; download can take a little while - a silent freeze here would look
 ; like the installer hung.
+; runasoriginaluser: on an elevated (admin) install this step must run as the
+; actual signed-in user, so Playwright's browser lands in THAT user's
+; %APPDATA%\Media Downloader\playwright-browsers (where the app looks for it),
+; not the admin account's. The app itself hides the child console window and
+; verifies the browser is usable afterwards (see core/url_scraper.py).
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--playwright-install"; \
     StatusMsg: "Downloading the browser component needed for URL Scraping..."; \
-    Flags: waituntilterminated
+    Flags: waituntilterminated runasoriginaluser
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -180,7 +185,7 @@ begin
           OptionsDir := AppDataPath + '\options';
           if not DirExists(OptionsDir) then
             CreateDir(OptionsDir);
-          FileCopy(ImportSource, OptionsDir + '\pending_import.json', False);
+          CopyFile(ImportSource, OptionsDir + '\pending_import.json', False);
         end;
       end;
     end;

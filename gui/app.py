@@ -4086,7 +4086,7 @@ class App(ctk.CTk):
         media_type = {"Both": "both", "Video": "video", "Audio": "audio"}.get(self.scrape_type_var.get(), "both")
         threading.Thread(target=self._run_url_scrape, args=(url, media_type), daemon=True).start()
 
-    def _run_url_scrape(self, url, media_type):
+    def _run_url_scrape(self, url, media_type, offer_install=True):
         from core.url_scraper import scrape_media_urls, fetch_titles_for_urls
 
         def log(msg):
@@ -4104,8 +4104,18 @@ class App(ctk.CTk):
             # automatically retry) instead of just dumping that raw
             # text at the user, per how this was specifically asked for
             # after the reported "executable is not found" bug.
-            if "Executable doesn't exist" in error_text or "playwright install" in error_text:
+            missing_browser = "Executable doesn't exist" in error_text or "playwright install" in error_text
+            if missing_browser and offer_install:
                 self.after(0, lambda: self._offer_playwright_install_and_retry(url, media_type))
+            elif missing_browser:
+                # Already went through the install flow once this attempt -
+                # don't loop back into the same popup. Show a plain error.
+                self.after(0, lambda: messagebox.showerror(
+                    "URL Scraping unavailable",
+                    "The browser component still isn't working after installing it.\n\n"
+                    "Try restarting the app. If it keeps failing, you can reinstall it "
+                    "from a command prompt with:  playwright install chromium"))
+                self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
             else:
                 self.after(0, lambda: messagebox.showerror("Scrape failed", error_text))
                 self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
@@ -4141,7 +4151,9 @@ class App(ctk.CTk):
         if ok:
             self.after(0, lambda: self.scrape_status_label.configure(
                 text="Browser installed - retrying...", text_color="#2fa84f"))
-            self._run_url_scrape(url, media_type)
+            # offer_install=False: if the retry STILL can't find the browser,
+            # surface a plain error instead of looping back to this popup.
+            self._run_url_scrape(url, media_type, offer_install=False)
         else:
             self.after(0, lambda: messagebox.showerror("Install failed", message))
             self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
