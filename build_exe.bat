@@ -1,15 +1,64 @@
 @echo off
-REM Run this from inside the VideoDownloaderApp folder on Windows.
+setlocal EnableExtensions
+REM Builds dist\MediaDownloader\MediaDownloader.exe with PyInstaller (--onedir).
+REM Double-click this file, or run it from any terminal - it cd's to its own
+REM folder first, so it doesn't matter where you launch it from.
+cd /d "%~dp0"
+echo Working folder: %CD%
+echo.
 
-python -m pip install -r requirements.txt
-python -m pip install pyinstaller
+REM --- find a Python that actually works -------------------------------------
+set "PY="
+py -3 -V >nul 2>&1 && set "PY=py -3"
+if not defined PY ( python -V >nul 2>&1 && set "PY=python" )
+if not defined PY (
+  for %%P in (
+    "%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    "%ProgramFiles%\Python313\python.exe"
+    "%ProgramFiles%\Python312\python.exe"
+  ) do if exist "%%~P" set "PY=%%~P"
+)
+if not defined PY (
+  echo.
+  echo ERROR: could not find Python. Install it from https://www.python.org/downloads/
+  echo         ^(tick "Add python.exe to PATH"^), then run this again.
+  echo.
+  pause
+  exit /b 1
+)
+echo Using Python: %PY%
+%PY% -V
+echo.
 
-REM --collect-data customtkinter: bundles customtkinter's own theme JSON files
-REM   (without them the app raises "FileNotFoundError: .../blue.json" on launch).
-REM --collect-all playwright: bundles the Playwright package + its driver so URL
-REM   Scraping works in the frozen build (the Chromium browser itself is still a
-REM   separate download - see installer.iss's --playwright-install [Run] step).
-python -m PyInstaller --noconfirm --onedir --windowed ^
+REM --- dependencies -------------------------------------------------------------
+echo Installing / checking dependencies...
+%PY% -m pip install --disable-pip-version-check -r requirements.txt
+if errorlevel 1 echo [warn] "pip install -r requirements.txt" reported an error - continuing anyway ^(the packages may already be installed^).
+%PY% -m pip show pyinstaller >nul 2>&1 || %PY% -m pip install --disable-pip-version-check pyinstaller
+%PY% -c "import PyInstaller" 2>nul
+if errorlevel 1 (
+  echo.
+  echo ERROR: PyInstaller is not available and could not be installed. Cannot build.
+  echo.
+  pause
+  exit /b 1
+)
+echo.
+
+REM --- build -----------------------------------------------------------------
+REM --collect-data customtkinter : bundle customtkinter's theme JSON files
+REM                                ^(app crashes on launch without them^).
+REM --collect-all playwright     : bundle the Playwright package + driver so URL
+REM                                Scraping works ^(the Chromium browser itself
+REM                                is still a separate post-install download -
+REM                                see installer.iss's --playwright-install step^).
+REM --exclude-module pygame*     : never needed by this app; keeps the build lean
+REM                                if pygame happens to be in the environment.
+echo Building - this takes a minute or two...
+echo.
+%PY% -m PyInstaller --noconfirm --onedir --windowed ^
     --name "MediaDownloader" --icon "icon.ico" ^
     --add-data "DISCLAIMER.txt;." ^
     --add-data "assets;assets" ^
@@ -17,26 +66,26 @@ python -m PyInstaller --noconfirm --onedir --windowed ^
     --add-data "updates;updates" ^
     --collect-data customtkinter ^
     --collect-all playwright ^
+    --exclude-module pygame ^
+    --exclude-module pygame_ce ^
     main.py
 
+echo.
 if exist "dist\MediaDownloader\MediaDownloader.exe" (
+    echo ============================================================
+    echo Build complete:  dist\MediaDownloader\MediaDownloader.exe
+    echo ============================================================
+    echo Share the whole  dist\MediaDownloader\  folder - it is a --onedir
+    echo build, not a single file. Runtime data ^(config, history, ffmpeg,
+    echo playwright-browsers^) is created under %%APPDATA%%\Media Downloader
+    echo on first run, so nothing else on the PC is touched.
     echo.
-    echo Build complete. Find MediaDownloader.exe inside dist\MediaDownloader\
-    echo (this is a folder build, not a single file - see the note below).
-    echo config.json, history.json, playlists.json and the ffmpeg\ folder
-    echo will be created under %%APPDATA%%\Media Downloader on first run -
-    echo that works even if the app is later installed to Program Files.
-    echo.
-    echo NOTE: this is now built as --onedir instead of --onefile. A onefile
-    echo .exe self-extracts to a temp folder every time it runs, which is
-    echo exactly the behavior antivirus/Windows Defender heuristics often
-    echo flag and silently kill - with no error message, no crash log,
-    echo nothing - because the kill happens at the OS level, outside the
-    echo app entirely. --onedir avoids that self-extraction step, so it
-    echo starts faster AND is far less likely to get silently terminated.
-    echo Share the whole dist\MediaDownloader\ folder, not just the .exe.
+    echo To make a real installer next, compile installer.iss with Inno Setup.
 ) else (
-    echo.
+    echo ############################################################
     echo Build FAILED - scroll up for the PyInstaller error.
+    echo ############################################################
 )
+echo.
 pause
+endlocal
