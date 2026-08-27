@@ -4113,6 +4113,7 @@ class App(ctk.CTk):
 
         self.scrape_results_frame = ctk.CTkScrollableFrame(tab)
         self.scrape_results_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self._refresh_scrape_results_display()  # show the "No results yet" placeholder from the start
 
     def _start_url_scrape(self):
         url = self.scrape_url_entry.get().strip()

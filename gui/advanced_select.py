@@ -91,7 +91,12 @@ def build_selection_toolbar(parent, selector, all_ids_getter, on_download=None, 
                             command=on_toggle)
     toggle.pack(side="left", padx=(0, 10))
 
-    action_row = ctk.CTkFrame(parent, fg_color="transparent")
+    # width/height=1: an empty CTkFrame otherwise keeps its default 200x200,
+    # which - while "Select multiple" is off (the default) and this frame has
+    # no buttons in it - inflated the whole toolbar row to ~200px tall and
+    # left the toggle floating in the middle of a big gap. Geometry
+    # propagation is on, so it still grows to fit the buttons once shown.
+    action_row = ctk.CTkFrame(parent, fg_color="transparent", width=1, height=1)
     action_row.pack(side="left")
 
     def refresh_visibility():
