@@ -123,6 +123,10 @@ Bug fixes:
 - **"Remember maximized" now works.** Closing while maximized is remembered
   and a "Remembered" launch restores a true maximized window (it used to
   reopen as a plain floating window at maximized size).
+- **"Select multiple" toolbar spacing.** The multi-select toolbar (on
+  Playlists, History, Library, URL Scraping) no longer inflates its row to
+  ~200px and leaves the toggle floating in a big gap while selection is off.
+- URL Scraping shows its "No results yet" placeholder from first render.
 
 Appearance / behavior:
 - Launches maximized by default; any non-maximized launch is centered on
