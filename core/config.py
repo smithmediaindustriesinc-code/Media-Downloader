@@ -72,6 +72,11 @@ DEFAULT_CONFIG = {
                             # failed item from Request History always
                             # bypasses this check regardless of this
                             # setting - a retry is a deliberate re-attempt.
+    "media_library_download_root_optout": False,  # the default download
+                            # folder is auto-added to the Media Library
+                            # (see gui/app.py _ensure_download_root_in_library);
+                            # this flips True if the user removes it, so it
+                            # isn't re-added on the next launch.
     "media_library_directories": [],  # folders the Media tab's Library
                             # subtab is allowed to scan - empty by
                             # default (nothing until the user configures

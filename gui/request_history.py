@@ -178,6 +178,7 @@ def build_request_history_section(app, parent):
     search_entry = ctk.CTkEntry(filter_row, textvariable=search_var, font=app.font_normal,
                                  placeholder_text="Search request names...")
     search_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+    search_entry.bind("<Return>", lambda e: refresh())
     app._add_search_clear_button(search_entry, search_var)
     search_var.trace_add(
         "write", lambda *_: app._debounced_call("_request_history_search_after_id", 300, refresh))

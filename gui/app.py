@@ -223,6 +223,7 @@ class App(ctk.CTk):
         self._start_autosave()
         self._restore_draft_fields()
         self._recover_interrupted_downloads()
+        self._ensure_download_root_in_library()  # A9: download folder is a library folder by default
 
     RESOLUTION_PRESETS_BASE = [
         (3840, 2160), (2560, 1440), (1920, 1080), (1600, 900),
@@ -469,9 +470,25 @@ class App(ctk.CTk):
         self.cfg["music_path"] = music_path
         self.cfg["playlists_path"] = playlists_path
         save_config(self.cfg)
+        self._ensure_download_root_in_library()
         if hasattr(self, "download_root_label"):
             self.download_root_label.configure(text=chosen)
         return True
+
+    def _ensure_download_root_in_library(self):
+        """A9: the default download folder is a Media Library scan folder
+        by default. Added once at the front of the list; if the user later
+        removes it (see _remove_library_directory), the opt-out flag keeps
+        it from coming back."""
+        root = self.cfg.get("download_root", "")
+        if not root or self.cfg.get("media_library_download_root_optout"):
+            return
+        dirs = self.cfg.setdefault("media_library_directories", [])
+        if root not in dirs:
+            dirs.insert(0, root)
+            save_config(self.cfg)
+            if hasattr(self, "library_dirs_frame") and self.library_dirs_frame.winfo_exists():
+                self._refresh_library_dirs_list()
 
     def _ensure_download_root_for_download(self):
         """Called right before a download starts. Returns True if a valid
@@ -807,6 +824,8 @@ class App(ctk.CTk):
         url_row.grid_columnconfigure(0, weight=1)
         self.url_entry = ctk.CTkEntry(url_row, placeholder_text="https://...", font=self.font_normal)
         self.url_entry.grid(row=0, column=0, sticky="ew")
+        # Enter = Fetch info (not a download, so allowed per the 1.6.0 rule).
+        self.url_entry.bind("<Return>", lambda e: self.fetch_info_clicked())
         self._add_clear_button(url_row, self.url_entry, also_clear_thumbnail=True).grid(row=0, column=1, padx=(6, 6))
         ctk.CTkButton(url_row, text="Fetch info", width=100, font=self.font_normal,
                       command=self.fetch_info_clicked).grid(row=0, column=2)
@@ -2246,6 +2265,7 @@ class App(ctk.CTk):
         playlist_search_entry = ctk.CTkEntry(playlist_search_row, textvariable=self.playlist_search_var,
                                               font=self.font_small, placeholder_text="Search playlists...")
         playlist_search_entry.pack(side="left", fill="x", expand=True)
+        playlist_search_entry.bind("<Return>", lambda e: self._refresh_playlists_tab())
         self._add_search_clear_button(playlist_search_entry, self.playlist_search_var)
         self.playlist_search_var.trace_add(
             "write", lambda *_: self._debounced_call("_playlist_search_after_id", 300, self._refresh_playlists_tab))
@@ -2592,9 +2612,13 @@ class App(ctk.CTk):
         filter_row = ctk.CTkFrame(tab, fg_color="transparent")
         filter_row.grid(row=0, column=0, sticky="ew", pady=(10, 6))
         self.library_search_var = ctk.StringVar(value="")
+        # Fixed width rather than fill/expand: letting the search box eat all
+        # the leftover row space is what squished the Sort / Type / Refresh
+        # controls to its right on a normal-width window.
         search_entry = ctk.CTkEntry(filter_row, textvariable=self.library_search_var, font=self.font_normal,
-                                     placeholder_text="Search your library...")
-        search_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+                                     width=240, placeholder_text="Search your library...")
+        search_entry.pack(side="left", padx=(0, 8))
+        search_entry.bind("<Return>", lambda e: self._refresh_library_tab())
         self._add_search_clear_button(search_entry, self.library_search_var)
         self.library_search_var.trace_add(
             "write", lambda *_: self._debounced_call("_library_search_after_id", 300, self._refresh_library_tab))
@@ -2834,6 +2858,7 @@ class App(ctk.CTk):
         search_entry = ctk.CTkEntry(filter_row, textvariable=self.history_search_var, font=self.font_normal,
                                      placeholder_text="Search downloaded names...")
         search_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        search_entry.bind("<Return>", lambda e: self._refresh_history_tab())
         self._add_search_clear_button(search_entry, self.history_search_var)
         self.history_search_var.trace_add(
             "write", lambda *_: self._debounced_call("_history_search_after_id", 300, self._refresh_history_tab))
@@ -3435,12 +3460,23 @@ class App(ctk.CTk):
                                         "success" if not failed else "info")
             MoveFilesDialog(self, existing_files, self.font_normal, self.font_label, do_move)
 
+        old_root = self.cfg.get("download_root", "")
         self.cfg["download_root"] = new_root
         self.cfg["video_path"] = new_video
         self.cfg["music_path"] = new_music
         self.cfg["playlists_path"] = new_playlists
+        # A9: keep the Media Library pointed at the current download folder -
+        # drop the old auto-added root, add the new one (a fresh choice also
+        # clears any earlier opt-out).
+        lib_dirs = self.cfg.setdefault("media_library_directories", [])
+        if old_root and old_root in lib_dirs:
+            lib_dirs.remove(old_root)
+        self.cfg["media_library_download_root_optout"] = False
         save_config(self.cfg)
+        self._ensure_download_root_in_library()
         self.download_root_label.configure(text=new_root)
+        if hasattr(self, "library_dirs_frame") and self.library_dirs_frame.winfo_exists():
+            self._refresh_library_dirs_list()
         self._log(f"Default download folder changed to {new_root}")
 
     def _default_bg_color(self):
@@ -4037,6 +4073,7 @@ class App(ctk.CTk):
         self.scrape_url_entry = ctk.CTkEntry(input_row, placeholder_text="https://... - page to scrape",
                                               font=self.font_normal)
         self.scrape_url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.scrape_url_entry.bind("<Return>", lambda e: self._start_url_scrape())
         self._add_clear_button(input_row, self.scrape_url_entry).grid(row=0, column=1, padx=(0, 8))
         self.scrape_type_var = ctk.StringVar(value="Both")
         ScrollableDropdown(input_row, ["Both", "Video", "Audio"], self.scrape_type_var,
@@ -4291,6 +4328,7 @@ class App(ctk.CTk):
         self.dev_user_entry = ctk.CTkEntry(dev_user_row, placeholder_text="Username",
                                             font=self.font_normal, width=250)
         self.dev_user_entry.pack(side="left")
+        self.dev_user_entry.bind("<Return>", lambda e: self._dev_login_clicked())
         self._add_clear_button(dev_user_row, self.dev_user_entry).pack(side="left", padx=(6, 0))
 
         dev_pass_row = ctk.CTkFrame(self._dev_login_area, fg_color="transparent")
@@ -4644,6 +4682,10 @@ class App(ctk.CTk):
         dirs = self.cfg.get("media_library_directories", [])
         if directory in dirs:
             dirs.remove(directory)
+            # If they removed the auto-added download folder, remember that
+            # so _ensure_download_root_in_library doesn't put it back.
+            if directory == self.cfg.get("download_root"):
+                self.cfg["media_library_download_root_optout"] = True
             save_config(self.cfg)
         self._refresh_library_dirs_list()
 
