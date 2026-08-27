@@ -4,12 +4,19 @@ REM Run this from inside the VideoDownloaderApp folder on Windows.
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller
 
+REM --collect-data customtkinter: bundles customtkinter's own theme JSON files
+REM   (without them the app raises "FileNotFoundError: .../blue.json" on launch).
+REM --collect-all playwright: bundles the Playwright package + its driver so URL
+REM   Scraping works in the frozen build (the Chromium browser itself is still a
+REM   separate download - see installer.iss's --playwright-install [Run] step).
 python -m PyInstaller --noconfirm --onedir --windowed ^
     --name "MediaDownloader" --icon "icon.ico" ^
     --add-data "DISCLAIMER.txt;." ^
     --add-data "assets;assets" ^
     --add-data "icon.ico;." ^
     --add-data "updates;updates" ^
+    --collect-data customtkinter ^
+    --collect-all playwright ^
     main.py
 
 if exist "dist\MediaDownloader\MediaDownloader.exe" (
