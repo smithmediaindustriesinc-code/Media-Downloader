@@ -29,6 +29,7 @@ from PIL import Image
 MIN_DISPLAY_SECONDS = 5
 PLEASE_WAIT_AFTER_SECONDS = 60
 _REVEAL_SECONDS = 1.2  # how long the grow-and-fade-in of the real icon takes
+_HOLD_SECONDS = 0.35   # brief pause at each end of the pulse before it reverses
 BG_COLOR = (10, 14, 30)  # matches the icon artwork's own dark backdrop, not a separately-tuned color
 
 _ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
@@ -62,16 +63,30 @@ def _ease_out_back(t):
 
 
 def _draw_logo_frame(elapsed_seconds):
-    """elapsed_seconds: real time since the splash started. Maps onto a
-    single grow+fade reveal of the real icon artwork that completes
-    after _REVEAL_SECONDS, then just holds at full size/opacity for
-    however much longer the splash stays up. Returns a PIL Image (RGBA,
-    256x256) for this exact moment - called repeatedly with an
-    increasing elapsed_seconds to animate."""
+    """elapsed_seconds: real time since the splash started. Maps onto an
+    oscillating grow+fade reveal of the real icon artwork: it grows in
+    over _REVEAL_SECONDS, holds briefly, shrinks back out, holds briefly,
+    then loops - a slow breathing pulse for as long as the splash stays
+    up. Returns a PIL Image (RGBA, 256x256) for this exact moment -
+    called repeatedly with an increasing elapsed_seconds to animate."""
     size = 256
     source = _logo_source()
 
-    t = min(1.0, max(0.0, elapsed_seconds) / _REVEAL_SECONDS)
+    # Oscillating reveal: grow in over _REVEAL_SECONDS, hold at full size for
+    # _HOLD_SECONDS, shrink back out over _REVEAL_SECONDS, hold empty, then
+    # loop - for as long as the splash stays up.
+    _span = _REVEAL_SECONDS + _HOLD_SECONDS
+    _cycle = 2 * _span
+    _phase = max(0.0, elapsed_seconds) % _cycle
+    if _phase < _REVEAL_SECONDS:
+        t = _phase / _REVEAL_SECONDS
+    elif _phase < _span:
+        t = 1.0
+    elif _phase < _span + _REVEAL_SECONDS:
+        t = 1.0 - (_phase - _span) / _REVEAL_SECONDS
+    else:
+        t = 0.0
+    t = min(1.0, max(0.0, t))
     alpha = int(255 * min(1.0, t * 1.3))  # fades in slightly faster than it finishes growing
     scale = 0.55 + 0.45 * _ease_out_back(t)
 

@@ -236,7 +236,7 @@ class App(ctk.CTk):
         window couldn't actually be."""
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
-        choices = ["Remembered (last closed size)", "Fullscreen"]
+        choices = ["Fullscreen", "Remembered (last size)"]
         for w, h in self.RESOLUTION_PRESETS_BASE:
             if w <= screen_w and h <= screen_h:
                 choices.append(f"{w}x{h}")
@@ -282,7 +282,8 @@ class App(ctk.CTk):
             self.geometry(f"{screen_w}x{screen_h}+0+0")
             return
 
-        if choice not in ("Remembered", "Remembered (last closed size)") and "x" in choice:
+        if choice not in ("Remembered", "Remembered (last size)", "Remembered (last closed size)") \
+                and "x" in choice:
             try:
                 w, h = (int(p) for p in choice.split("x"))
                 self._center_window(w, h)
@@ -290,14 +291,24 @@ class App(ctk.CTk):
             except ValueError:
                 pass  # fall through to remembered/default below
 
+        # "Remembered": if the window was left maximized, restore a real
+        # maximized state (see _on_close_requested, which saves that flag).
+        # Otherwise re-center at the remembered SIZE - as of 1.6.0 a
+        # non-maximized window is always centered on launch, never reopened
+        # at its exact last on-screen position.
+        if self.cfg.get("window_maximized", False):
+            try:
+                self.state("zoomed")
+                return
+            except Exception:
+                pass
+            try:
+                self.attributes("-zoomed", True)
+                return
+            except Exception:
+                pass
         width = self.cfg.get("window_width", 820)
         height = self.cfg.get("window_height", 720)
-        x = self.cfg.get("window_x")
-        y = self.cfg.get("window_y")
-        if x is not None and y is not None:
-            x, y = self._clamp_to_screen(x, y, width, height)
-            self.geometry(f"{width}x{height}+{x}+{y}")
-            return
         self._center_window(width, height)
 
     def _on_window_configure(self, event):
@@ -3198,10 +3209,13 @@ class App(ctk.CTk):
         launch_header_row.pack(anchor="w", fill="x")
         self._sub_header(launch_header_row, "Launch Size", pack_side="left")
         self._add_hint_icon(launch_header_row, "Only applies when the app is opened, not while it's already "
-                             "running. \"Fullscreen\" maximizes the window (not a borderless fullscreen mode); "
-                             "\"Remembered\" also keeps the window locked to a visible part of the screen "
-                             "even if your monitor setup changes.").pack(side="left", padx=(4, 0), pady=(14, 6))
-        self.launch_resolution_var = ctk.StringVar(value=self.cfg.get("launch_resolution", "Remembered"))
+                             "running. \"Fullscreen\" maximizes the window (not a borderless fullscreen mode). "
+                             "\"Remembered\" reopens at the last size, centered on screen - and restores a "
+                             "maximized window if you left it maximized. A fixed size is always centered "
+                             "too.").pack(side="left", padx=(4, 0), pady=(14, 6))
+        _stored_launch = self.cfg.get("launch_resolution", "Fullscreen")
+        self.launch_resolution_var = ctk.StringVar(
+            value="Remembered (last size)" if _stored_launch.startswith("Remembered") else _stored_launch)
         ScrollableDropdown(scroll, self._resolution_preset_choices(), self.launch_resolution_var,
                             font=self.font_normal, width=300,
                             command=self._on_launch_resolution_changed).pack(anchor="w", padx=5, pady=(0, 8))
@@ -3915,17 +3929,23 @@ class App(ctk.CTk):
     def _on_close_requested(self):
         """Distinguishes a normal user-initiated close (X button / Alt+F4)
         from the app disappearing unexpectedly - so future logs make clear
-        which one happened. Also remembers the current window size AND
-        position (which monitor, and where on it) so the next launch
-        reopens in the same place - first-ever launch, with nothing saved
-        yet, centers instead (see _apply_launch_geometry)."""
+        which one happened. Also remembers the window's last size and
+        whether it was maximized, so a "Remembered" launch restores that
+        (a non-maximized window is re-centered at that size; see
+        _apply_launch_geometry)."""
         from core.startup_log import mark
         self._closing = True  # see the note on this flag in __init__
         try:
-            self.cfg["window_width"] = self.winfo_width()
-            self.cfg["window_height"] = self.winfo_height()
-            self.cfg["window_x"] = self.winfo_x()
-            self.cfg["window_y"] = self.winfo_y()
+            # When maximized, winfo_width/height/x/y report the maximized
+            # rectangle, not a useful floating size - so keep the last
+            # NON-maximized size/position and just flag the maximized state.
+            is_maximized = self.state() == "zoomed"
+            self.cfg["window_maximized"] = is_maximized
+            if not is_maximized:
+                self.cfg["window_width"] = self.winfo_width()
+                self.cfg["window_height"] = self.winfo_height()
+                self.cfg["window_x"] = self.winfo_x()
+                self.cfg["window_y"] = self.winfo_y()
             save_config(self.cfg)
         except Exception:
             pass  # never let saving the size/position block the app from closing
@@ -3988,18 +4008,18 @@ class App(ctk.CTk):
     # developer login that dynamically opens the Developer tab.
     # ================================================================== #
     def _build_more_tab(self, tab):
-        """More has two subtabs: Information (everything that used to
-        just be "the More tab" - disclaimer, dev login, uninstall - now
-        the default landing subtab) and URL Scraping (new)."""
+        """More has two subtabs: URL Scraping (the primary one as of 1.6.0 -
+        first in order and the default landing subtab) and Information
+        (disclaimer, dev login, uninstall)."""
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
         self.more_tabview = ctk.CTkTabview(tab)
         self.more_tabview.grid(row=0, column=0, sticky="nsew")
-        info_tab = self.more_tabview.add("Information")
         scraping_tab = self.more_tabview.add("URL Scraping")
-        self._build_more_information_subtab(info_tab)
+        info_tab = self.more_tabview.add("Information")
         self._build_url_scraping_subtab(scraping_tab)
-        self.more_tabview.set("Information")  # explicit default, even though .add() order already implies it
+        self._build_more_information_subtab(info_tab)
+        self.more_tabview.set("URL Scraping")  # default landing subtab (1.6.0)
 
     def _build_url_scraping_subtab(self, tab):
         tab.grid_columnconfigure(0, weight=1)

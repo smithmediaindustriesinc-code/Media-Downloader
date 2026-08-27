@@ -28,11 +28,16 @@ DEFAULT_CONFIG = {
                             # brand new install starts with (first-ever
                             # launch size), and get overwritten on every
                             # normal close after that.
-    "window_x": None,      # position (which monitor + where on it) the
-    "window_y": None,      # window was last closed at. None on a fresh
-                            # install = center on the primary monitor
-                            # instead of using a possibly-invalid position.
-    "launch_resolution": "Remembered",  # "Remembered" = use window_width/
+    "window_x": None,      # last non-maximized position. Kept for the
+    "window_y": None,      # settings-migration path; as of 1.6.0 a
+                            # "Remembered" launch re-centers at the saved
+                            # size rather than restoring this position.
+    "window_maximized": False,  # was the window maximized at last close?
+                            # A "Remembered" launch restores state("zoomed")
+                            # from this; see gui/app.py _apply_launch_geometry
+                            # / _on_close_requested. This is what fixes
+                            # "remember last fullscreen" not sticking.
+    "launch_resolution": "Fullscreen",  # "Fullscreen" = a true maximized window (default). "Remembered" = use window_width/
                             # height/x/y above. Otherwise one of the
                             # preset sizes computed from the primary
                             # monitor (see RESOLUTION_PRESETS in
@@ -99,11 +104,11 @@ DEFAULT_CONFIG = {
                             # change (every tab switch takes visibly
                             # longer), not something to force on anyone.
     "loading_delay_ms": 500,
-    "dynamic_batch_queue_enabled": False,  # Advanced > Batch Queue -
+    "dynamic_batch_queue_enabled": True,  # Advanced > Batch Queue -
                             # when on, the plain textbox is replaced by
                             # a scrollable list of individually-
                             # removable URL rows with undo support (see
-                            # gui/app.py's _refresh_batch_dynamic_list).
+                            # gui/app.py's _refresh_batch_dynamic_list). On by default as of 1.6.0.
 }
 
 
