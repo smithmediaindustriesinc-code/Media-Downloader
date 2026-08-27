@@ -1,0 +1,11 @@
+Non compatable URL's:
+    -Spotify
+    -Disney
+    -Hulu
+    -Peacock
+    -Any other website that uses a DRM (Digital rights managment) tool
+
+Compatable URL's:
+    -Youtube
+    -Youtube music
+    -Internet video archives

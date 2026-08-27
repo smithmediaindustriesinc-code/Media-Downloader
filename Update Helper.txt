@@ -1,0 +1,2333 @@
+UPDATE HELPER
+=============
+A plain-English guide to how this app is built, so you can change or add
+features yourself later without having to re-learn the whole codebase.
+
+
+1. THE BIG PICTURE
+-------------------
+This is a desktop GUI app written in Python, using a library called
+"customtkinter" (a modern-looking skin on top of Python's built-in tkinter
+GUI toolkit). It downloads video/audio using "yt-dlp" (a very actively
+maintained fork of youtube-dl), and optionally shells out to FFmpeg (for
+merging/converting) and VLC (just to open files).
+
+Three layers, kept deliberately separate:
+
+  core/    -  no GUI code at all. Pure logic: talking to yt-dlp, reading and
+              writing JSON files, checking for dependencies, moving files.
+              You could reuse everything in here in a command-line tool.
+
+  gui/     -  everything the user sees and clicks. Imports from core/ and
+              calls it, but core/ never imports from gui/. This one-way
+              relationship keeps things untangled - the logic doesn't know
+              or care that a GUI exists.
+
+  updates/ -  tiny standalone scripts, one per dependency, that just call
+              functions already defined in core/dependencies.py. They exist
+              so you (or a scheduled task, or a script) can update a single
+              dependency from the command line without opening the app:
+                  python updates\update_ytdlp.py
+
+main.py is the entry point - it just calls gui/app.py's run() function. That
+run() function (not main.py) is where startup wiring happens - installing
+crash logging, then constructing the App and calling mainloop(). main.py
+itself is deliberately kept to those three lines; if you need to add new
+startup-time setup, it belongs in core/bootstrap.py's bootstrap() function
+(called from run()), not in main.py.
+
+
+2. HOW A DOWNLOAD ACTUALLY HAPPENS
+-----------------------------------
+gui/app.py's start_single_download():
+  1. Reads the URL/name/type from the text boxes.
+  2. Checks there's a default folder AND that FFmpeg is installed - if
+     either is missing, it stops immediately and tells you why (this is
+     the "tell the user what failed" behavior you asked for - previously
+     the app would just silently do nothing).
+  3. Spins up a new background thread (_run_single) so the window doesn't
+     freeze while the file downloads.
+  4. That thread creates a core/downloader.py Downloader object and calls
+     .download_video() or .download_audio() on it.
+  5. Downloader wraps yt_dlp.YoutubeDL(...).download([url]) with a
+     "progress_hook" - a function yt-dlp calls repeatedly while it works,
+     which we use to update the progress bar.
+  6. Every exception is caught and wrapped in a DownloadStageError that
+     records WHICH stage failed (info fetch / format selection /
+     download-merge) so the error message you see is specific, not generic.
+  7. When it's done (success, failure, or cancel), core/history.py logs an
+     entry, and the UI re-enables the Download button.
+
+Because everything after step 3 runs in a background thread, and tkinter
+widgets can only safely be touched from the main thread, you'll see a lot
+of "self.after(0, lambda: ...)" calls - that's how a background thread asks
+the main thread to update a label/progress bar/etc safely. If you add new
+background work, follow this same pattern: do the slow work in a thread,
+and only touch widgets via self.after(0, ...).
+
+
+3. THE TABS (gui/app.py)
+-------------------------
+The whole window is one CTkTabview with five tabs, each built by its own
+_build_..._tab() method inside the App class. This is why there's no
+separate pop-up window for Settings/History anymore - they're just frames
+placed inside a tab instead of a Toplevel window, which is lighter on
+memory and keeps everything in one place as you asked.
+
+  _build_download_tab()   - the main workflow: single download + batch queue
+                             (as an inner, nested CTkTabview), thumbnail
+                             preview, progress bar, log box.
+  _build_playlists_tab()  - a JSON file (playlists.json) mapping playlist
+                             name -> list of file paths. "New Playlist"
+                             opens a small dialog (gui/dialogs.py).
+  _build_history_tab()    - reads/writes history.json via core/history.py.
+  _build_settings_tab()   - reads/writes config.json via core/config.py.
+                             Changing the default folder triggers
+                             gui/dialogs.py's MoveFilesDialog, which lets
+                             you pick (or Select All) which existing files
+                             should move to the new location.
+  _build_version_tab()    - calls core/dependencies.py's check_all() to
+                             list every dependency's install status, with
+                             per-item Install/Update buttons and one
+                             "Update All" button.
+
+To add a sixth tab: write a new _build_mytab(self, tab) method following
+the same pattern, call self.tabview.add("My Tab") in _build_ui(), then
+call self._build_mytab(that_new_tab_frame).
+
+
+4. THE SCROLLABLE DROPDOWN
+---------------------------
+Stock CTkOptionMenu doesn't scroll - a 20-item list just becomes a giant
+unscrollable menu. gui/scrollable_dropdown.py is a small custom widget:
+a button that, when clicked, opens a borderless popup window containing a
+CTkScrollableFrame full of option buttons. Any list-of-choices field in
+this app (fonts, quality presets, aspect ratios) uses this instead of the
+stock dropdown. To add a new dropdown field anywhere, do:
+
+    my_var = ctk.StringVar(value="default")
+    ScrollableDropdown(parent, ["A", "B", "C"], my_var, font=my_font).pack()
+
+...and read the choice later with my_var.get().
+
+
+5. DEPENDENCIES (core/dependencies.py)
+----------------------------------------
+Three different "kinds" of dependency, each checked and installed
+differently:
+
+  python  - customtkinter / yt-dlp / pillow. Checked with a plain
+            `import module` inside a try/except. Installed with
+            `pip install --upgrade <package>` run as a subprocess.
+
+  ffmpeg  - has no installer; it's just two .exe files. We download the
+            official static build zip from gyan.dev, unzip it, and copy
+            ffmpeg.exe/ffprobe.exe into <app folder>\ffmpeg\bin. We then
+            tell yt-dlp exactly where that folder is via the
+            "ffmpeg_location" option - so nothing needs to touch the
+            system PATH or need admin rights.
+
+  vlc     - checked by looking for vlc.exe in the usual
+            Program Files\VideoLAN\VLC location (or via `where vlc`).
+            Installed by downloading VLC's real installer from
+            get.videolan.org and running it with the silent-install
+            switches /L=1033 /S. If Windows blocks the silent run (some
+            locked-down PCs do), the code falls back to just opening the
+            installer window for you to click through manually.
+
+check_all() in that file returns a list every other part of the app reads
+from - the dependency banner at the top of the window, and the whole
+Version tab's list, are both just check_all() rendered as UI. If you add a
+new dependency, add one dict describing it, teach check_all what to check,
+and the Version tab / banner update automatically with zero other changes.
+
+
+6. WHERE FILES LIVE (core/paths.py)
+--------------------------------------
+This matters a lot for a packaged .exe, in two separate ways.
+
+First: when PyInstaller bundles everything into a single MediaDownloader.exe,
+double-clicking it actually extracts the whole app into a hidden temporary
+folder first (this is what sys._MEIPASS points to) - and that folder gets
+deleted when you close the app. resource_path() finds bundled read-only
+files (DISCLAIMER.txt, the settings gear icon, the updates/ scripts) inside
+that temp folder when frozen, since those never change and ship with the app.
+
+Second, and this one bit us in testing: writable data (config.json,
+history.json, playlists.json, the downloaded ffmpeg/ folder) can NOT simply
+live "next to the .exe" if the app is installed somewhere like
+C:\Program Files\Media Downloader - that folder is protected, and a normal
+(non-admin) Windows user gets a silent PermissionError trying to write
+there. So app_dir() instead resolves to the standard per-user data folder,
+%APPDATA%\Media Downloader (something like
+C:\Users\<you>\AppData\Roaming\Media Downloader), when running as a frozen
+.exe on Windows. When running from source (python main.py), it just uses
+the project folder, which is simpler for development. Either way, whatever
+app_dir() returns is where options/, history/, and ffmpeg/ get created.
+
+If you ever add a new bundled read-only file, remember to also add it to
+the --add-data line in build_exe.bat, or the .exe won't include it.
+
+
+7. ADDING A NEW SETTING
+-------------------------
+Three places, every time:
+  1. core/config.py -> add a key + default value to DEFAULT_CONFIG.
+  2. gui/app.py's _build_settings_tab() -> add the widget that edits it.
+  3. gui/app.py's _save_settings() -> add the line copying the widget's
+     value into self.cfg[...], then save_config(self.cfg) writes it out.
+
+Settings are read live from self.cfg wherever they're needed (e.g. the
+Download tab reads self.cfg["video_quality"] at download time), so once
+it's in config.json it's available everywhere.
+
+
+8. COMMON THINGS YOU MIGHT WANT TO CHANGE
+--------------------------------------------
+"I want a different default video quality/format"
+  -> core/downloader.py, edit VIDEO_QUALITY_MAP / VIDEO_FORMATS.
+
+"I want to add a new audio format"
+  -> core/downloader.py, add it to AUDIO_FORMATS - yt-dlp/FFmpeg support
+     it automatically if FFmpeg's audio encoders support it.
+
+"I want the window to open a different tab by default"
+  -> gui/app.py _build_ui(), reorder the self.tabview.add(...) calls, or
+     call self.tabview.set("Playlists") at the end of __init__.
+
+"I want to ask for the download folder at startup again instead of at
+ download time"
+  -> gui/app.py: call self._prompt_for_download_root() near the end of
+     __init__ (it used to be called there, as _ensure_download_root()).
+     Currently it's only called lazily, from
+     _ensure_download_root_for_download(), right before a download starts -
+     so a first-time user can open the app and look around before ever
+     being asked to pick a folder.
+
+"I want to change the app icon"
+  -> replace icon.ico in the project root (must stay named icon.ico, or
+     update every reference to it in gui/app.py, build_exe.bat, and
+     installer.iss).
+
+"I want a totally new feature tab"
+  -> see section 3 above.
+
+
+9. RUNNING IT WHILE YOU EDIT
+-------------------------------
+You do NOT need to rebuild the .exe to test changes - just run:
+    python main.py
+directly from the project folder. Only rebuild with build_exe.bat once
+you're happy and want a shareable .exe again.
+
+
+10. WHY IT'S BUILT AS --onedir, NOT --onefile
+------------------------------------------------
+PyInstaller can package everything into either a single .exe file
+(--onefile) or a folder containing the .exe plus its dependencies
+(--onedir). --onefile looks tidier to share, but it works by silently
+re-extracting the whole app into a temp folder every time it launches -
+and that self-extracting behavior is exactly what a lot of antivirus/
+Windows Defender heuristics flag and silently kill, with zero error
+message and zero trace in any log, because the kill happens at the OS
+level, entirely outside the Python program. That's a real failure mode we
+hit while building this app. --onedir avoids the self-extraction step
+entirely, starts faster, and is far less likely to get killed like that.
+When sharing the app, zip up the whole dist\MediaDownloader\ folder (or
+better, use the Inno Setup installer) rather than trying to hand someone
+a single .exe file.
+
+
+11. DIAGNOSTIC LOGGING (core/crash_log.py, core/startup_log.py)
+--------------------------------------------------------------------
+Three log files can appear in %APPDATA%\Media Downloader\ (or the project
+folder, when running from source):
+
+  crash_log.txt   - any normal Python exception, whether it happens during
+                     startup (before the window even opens) or inside a
+                     button click / background thread later. Comes with a
+                     message box too, so a crash is never silent.
+  startup_log.txt - a plain heartbeat, one line per startup stage,
+                     flushed to disk immediately as each stage completes.
+                     If the app dies with NO Python exception at all (a
+                     hard native crash, or getting killed by something
+                     external like antivirus), this is what tells you
+                     exactly which stage it never got past - the last
+                     line in the file is as far as it got.
+  fault_log.txt   - Python's built-in faulthandler output, which can
+                     sometimes catch true low-level crashes (segfault-style)
+                     that bypass normal exception handling.
+
+12. THE RECURRING-TASK SCHEDULER (_start_recurring)
+--------------------------------------------------------
+Two things need to run repeatedly for as long as the app is open: the
+clipboard watcher (checks for a copied URL every second) and a heartbeat
+(marks startup_log.txt every 3 seconds, forever). Both go through one
+shared helper, self._start_recurring(interval_ms, func, label), instead of
+each having its own hand-rolled self.after() loop with its own try/except.
+
+Why this matters: a recurring self.after() loop is fragile by construction
+- if the scheduled function raises and nothing reschedules it, the loop
+just quietly stops forever with no error, which looks exactly like part
+of the app "dying" even though the rest of the app is fine.
+_start_recurring's tick() wrapper puts the reschedule call in a `finally`,
+so the next tick is scheduled NO MATTER WHAT happened this tick - and any
+exception is logged (both to crash_log.txt via core.crash_log.log_error,
+and to startup_log.txt) rather than silently swallowed OR fatally killing
+the loop. One bad tick is now just a log line, not a dead feature.
+
+If you add a new recurring task, use this same helper:
+    self._start_recurring(interval_ms=5000, func=self._my_task, label="my task")
+
+The heartbeat specifically exists to answer "was the app actually alive
+5 minutes in, or did it die 3 seconds after opening?" - previously
+startup_log.txt only had a handful of fixed checkpoints in the first 2
+seconds, so a crash any time after that left no trace of how long the app
+survived. Now the last "heartbeat - event loop alive" line in the log IS
+that answer, no matter how long the app ran before whatever happened.
+
+Also added: self.protocol("WM_DELETE_WINDOW", self._on_close_requested)
+- a normal user closing the window via the X button or Alt+F4 now logs
+"WM_DELETE_WINDOW: user closed the window normally" before destroying the
+window, so a future log can immediately tell the difference between "the
+user closed it on purpose" and "it just stopped."
+
+
+13. DPI AWARENESS TRACKING - TURNED OFF
+--------------------------------------------
+customtkinter runs a background poller (via its own internal .after() loop,
+not a separate thread - it's safe with respect to Tcl's single-threaded
+design) that checks roughly every 100ms whether the monitor's DPI/scaling
+changed, so the UI can rescale itself if you drag the window to a monitor
+with different scaling. This app doesn't need that - gui/app.py calls
+ctk.deactivate_automatic_dpi_awareness() before the CTk root is even
+created, which turns that whole poller off. This isn't a confirmed fix for
+any specific bug, but it removes an entire always-running background loop
+and its associated Windows ctypes calls from the picture, which is a
+reasonable thing to trim regardless while chasing down anything
+unexplained happening a few seconds into a session.
+
+
+14. WINDOW SHOWS BUT ISN'T VISIBLE ON SCREEN (window centering / z-order)
+------------------------------------------------------------------------------
+A distinct failure mode from any of the above: the event loop runs fine
+forever (heartbeats keep ticking in startup_log.txt), but no window ever
+appears on screen. This isn't a crash at all, so none of the crash/fault
+logging catches it - the window genuinely exists as far as Tk is
+concerned, it's just not visible or reachable.
+
+The likely cause: gui/app.py calls self.withdraw() immediately after the
+CTk root is created, then later calls self.geometry("820x720") - a size
+with NO explicit x/y position - while still withdrawn. On some Windows
+setups, setting geometry on a withdrawn window and only supplying a size
+(not a position) can result in the window reappearing at a stale or
+off-screen position when deiconify() is finally called, rather than a
+sensible default location.
+
+The fix, in App.__init__:
+  - _center_window(width, height) explicitly computes a centered x/y
+    position from winfo_screenwidth()/winfo_screenheight() and sets
+    geometry as "WxH+X+Y", instead of leaving placement to chance.
+  - After deiconify(), the code also calls self.state("normal"),
+    self.lift(), self.attributes("-topmost", True) followed by a delayed
+    self.attributes("-topmost", False), and self.focus_force() - a
+    belt-and-suspenders sequence to force the window to the front and
+    grab OS focus, in case it was rendering successfully but simply
+    landing behind other windows.
+  - The taskbar icon (iconbitmap) is now set AFTER deiconify() rather
+    than before - setting it on a still-withdrawn window is a separate
+    known-flaky pattern on some Windows/Tcl-Tk combinations.
+
+If a window-visibility bug like this ever comes back, startup_log.txt's
+"deiconify() done - window state is now '...'" line is the one to check
+first - self.state() should read "normal"; anything else ("withdrawn",
+"iconic") means the window itself thinks it's still hidden.
+
+
+15. THE WINDOW-SHOW SEQUENCE - SIMPLIFIED, withdraw() REMOVED
+--------------------------------------------------------------------
+App.__init__ used to call self.withdraw() immediately after creating the
+window, planning to bring it back with self.deiconify() (plus lift(),
+focus_force(), and a brief -topmost flash) once setup finished. That
+withdraw() only ever existed to hide the window while a blocking
+first-run dialog (the old default-folder prompt) ran during __init__.
+
+That dialog doesn't exist anymore - the default-folder prompt moved to
+being lazy, asked only when a download actually needs it (see section 8),
+which happens later, in response to a button click, not during __init__.
+So the withdraw()/deiconify()/lift()/focus_force()/topmost-flash sequence
+was left behind solving a problem that no longer existed - and turned out
+to likely be causing a new one: a window that visibly appears and then
+disappears almost immediately is a known symptom of rapidly toggling
+-topmost true/false on some Windows/GPU-driver combinations.
+
+The fix: all of that is gone. App.__init__ now just builds the window
+normally - title, centered geometry, icon, then all the widgets - and
+never hides it in the first place. This is the standard, simplest pattern
+for a Tkinter/customtkinter app, and it's what's used now.
+
+If you ever have a genuine reason to hide the window during startup again
+(e.g. a new blocking dialog before the UI is ready), don't reintroduce
+manual lift()/focus_force()/topmost toggling to compensate - a plain
+self.deiconify() is normally sufficient on its own to bring a withdrawn
+window back correctly.
+
+
+16. PATHS ARE ANCHORED TO main.py'S LOCATION, NOT THE WORKING DIRECTORY
+-----------------------------------------------------------------------------
+core/paths.py's app_dir() (and resource_path()) used to compute the
+project root from core/paths.py's OWN file location - which happened to
+equal main.py's folder, but only because of where paths.py sits relative
+to it (two directories up). That's an implicit assumption, not a
+guarantee, and it doesn't answer the more useful question directly:
+"where did the user actually put this app?"
+
+Now, _entry_script_dir() in core/paths.py answers that directly: it reads
+sys.modules["__main__"].__file__ - Python always sets this to the actual
+script that was run, i.e. main.py, resolved to an absolute path. Every
+writable file (options/, history/, playlists.json, the downloaded
+ffmpeg/) and every bundled resource (DISCLAIMER.txt, assets/, icon.ico)
+is now explicitly anchored to that, not to os.getcwd() and not to an
+assumption about folder depth. This was tested by literally running
+main.py from a totally unrelated working directory
+(python /path/to/app/main.py from inside /tmp/somewhere/else) and
+confirming config.json still landed next to main.py, not in the random
+cwd - so it doesn't matter how or from where the app gets launched.
+
+
+17. PER-ENTRY HISTORY DELETION, ID MIGRATION
+--------------------------------------------------
+Every history entry now gets a unique "id" (a uuid4 string) when
+add_entry() creates it, so a single entry can be targeted for deletion
+without relying on its position in the list (which shifts every time a
+new download is added, since newest entries go at the front).
+core/history.py's delete_entry(entry_id) filters the stored list by id and
+rewrites history.json. The History tab's row builder
+(_refresh_history_tab in gui/app.py) now adds a "Delete" button per row,
+wired to self._delete_history_entry(entry_id).
+
+Backward compatibility: history.json files saved before this change won't
+have an "id" field on their entries. load_history() checks for this on
+every read and assigns a fresh uuid4 to any entry missing one, saving the
+migrated file back immediately - so old history is still fully usable and
+individually deletable, no manual migration step needed.
+
+
+18. THUMBNAIL CLEARING
+----------------------------
+self._clear_thumbnail() resets both the CTkImage reference
+(self.thumbnail_image = None - important so it isn't still held on to
+after the label stops showing it) and the CTkLabel's displayed image.
+_add_clear_button() takes an also_clear_thumbnail=True flag; the URL and
+Name fields' own X buttons pass this so clearing either one also clears
+whatever thumbnail was fetched for that download - the output folder
+field's X button does not, since a thumbnail isn't tied to that field.
+
+
+19. MANY MORE COLOR THEMES
+------------------------------
+customtkinter ships 4 built-in theme names: blue, green, dark-blue, and
+gold. gui/app.py's COLOR_THEMES list now also includes purple, red, teal,
+rose, slate, orange, cyan, and indigo - 12 total. Those 8 extra ones are
+JSON theme files under assets/themes/, generated by taking
+customtkinter's own blue.json as a template and replacing just its three
+accent-color pairs (the main accent, its hover shade, and the dropdown-
+menu hover shade) with a different hue's equivalents, leaving every
+structural property (corner radii, border widths, neutral grays, font
+settings) untouched. This guarantees every generated theme is fully
+schema-correct across every widget type CTk uses, rather than risking a
+hand-written theme file missing some CTkWidget's expected key and
+breaking a particular screen at runtime.
+
+apply_color_theme(theme_value) in gui/app.py is the one place that knows
+how to load either kind: if theme_value is one of the 4 real customtkinter
+names it's passed straight to ctk.set_default_color_theme(); otherwise
+it's treated as one of ours and resolved to
+resource_path(f"assets/themes/{theme_value}.json"). To add yet another
+theme, drop a new <name>.json into assets/themes/ (or regenerate more via
+the same template-substitution approach - see the generator logic used to
+create the current 8, which is not itself a checked-in script but a short
+one-off using Python's json module) and add its name to COLOR_THEMES.
+
+Remember to keep build_exe.bat's --add-data "assets;assets" line as-is -
+that already covers assets/themes/ too, so no separate packaging step is
+needed for new theme files.
+
+
+20. THE THUMBNAIL "image doesn't exist" CRASH - ROOT CAUSE + FIX
+-----------------------------------------------------------------------
+This one actually crashed in real use (confirmed from a submitted
+crash_log.txt) and took real investigation to pin down, so it's worth
+explaining properly.
+
+Symptom: clicking a field's clear button, or fetching a second video's
+info after the first one already showed a thumbnail, would sometimes
+raise _tkinter.TclError: image "pyimageN" doesn't exist and take the
+whole app down with it.
+
+The first, smaller bug: _clear_thumbnail() and _add_clear_button()'s
+do_clear() would call self.thumbnail_label.configure(image=None) even
+when there was nothing to clear (no thumbnail currently shown), which
+Tk doesn't handle gracefully. Fixed by checking
+self.thumbnail_image is not None before ever touching the widget.
+
+The second, deeper bug (the one that actually explains _show_thumbnail
+crashing, not just clearing): even calling configure() with a BRAND NEW
+CTkImage on the label - nothing to do with clearing at all - could still
+raise the exact same TclError, referencing an OLD image's name. This was
+tracked down with a direct reproduction: create image A, show it, clear
+it, create a completely different image B, try to show it - B's own
+configure() call would fail, even though B has never been shown before
+and A was already gone.
+
+The cause: once self.thumbnail_image is reassigned or set to None, the
+OLD CTkImage's Python object has no more references anywhere and gets
+garbage-collected. CTkImage apparently does some internal Tcl-level
+cleanup when that happens, and CTkLabel's own internal bookkeeping about
+"what image name is currently configured" doesn't get updated in sync -
+so the NEXT configure() call, even with a totally unrelated new image,
+can still reference the dead old name during its own internal update
+logic and throw.
+
+The fix (verified with a 10-15 iteration stress test that reliably
+reproduced the bug before the fix, and passed cleanly after):
+self._thumbnail_image_history (a plain list, set up in __init__) holds a
+reference to every CTkImage this session has ever created, forever (or
+technically capped at the most recent 30 - see the cap logic in
+_show_thumbnail - to keep a very long session's memory bounded; 30 tiny
+160x90 thumbnails is nothing). This means the underlying CTkImage objects
+are simply never garbage-collected while the app is running, which
+avoids whatever CTkLabel-vs-CTkImage desync causes the crash in the first
+place. self.thumbnail_image (the single "what's currently shown" value)
+still gets set to None on clear as before - that's a separate concern
+from whether the object gets garbage-collected.
+
+_show_thumbnail() also keeps a defensive try/except-and-retry-once around
+the actual configure() call as a second line of defense, in case some
+other, not-yet-understood variant of this same class of bug ever
+resurfaces - if it does, it now logs a message instead of crashing the
+app, which is a reasonable fallback for something as non-critical as a
+thumbnail failing to display once.
+
+If you ever see this exact TclError again somewhere else in the app
+(e.g. if a new feature adds another place that swaps CTkImages on a
+label), the fix is the same pattern: don't let old CTkImage objects get
+garbage-collected while the app is still running.
+
+
+21. THE REQUEST TRACKING SYSTEM (core/download_requests.py)
+------------------------------------------------------------------
+Every time a download is started with a URL present, one "request" gets
+created and tracked - whether it's a single URL, a batch queue, or a
+full playlist. This is separate from core/history.py (which is a flat
+chronological log of individual file downloads): a request groups
+everything that happened as part of ONE click of the Download button,
+and is what powers retrying a single failed URL from a batch without
+re-running the whole batch.
+
+Two dicts, persisted together in one JSON file
+(<app_dir>/history/download_requests.json):
+  requests_in_progress - still running
+  requests_completed   - every URL in the request has a final status
+                          (success or failed) - MOVES here even if every
+                          single URL failed, since the whole point of
+                          this system is being able to look back at what
+                          went wrong and retry it, not just record wins.
+
+Request IDs look like "video_queue_download-5" - <type>-<n>, where type
+is one of the 6 combinations of (Video/Audio) x (single/queue/playlist),
+and n is a running count of how many requests of that exact type have
+EVER existed (start_request() bumps a counter in the same JSON file;
+deleting old history entries doesn't reuse numbers).
+
+Retrying a single URL (see gui/request_history.py's _retry_url) doesn't
+create a new request - it calls reopen_for_retry(), which moves the
+WHOLE original request back to in_progress with just that one URL reset
+to "pending", runs the download again, and then finish_request() re-
+evaluates the whole request's overall status once it's done. This is
+what makes a retried request's dot correctly flip from red/orange back
+to green (or back to orange, if other items in that same request are
+still failed) - the request's status is always recomputed from its
+current items, never just patched in place.
+
+
+22. RETRY-3-TIMES AND CANCEL CLEANUP (core/downloader.py)
+------------------------------------------------------------------
+download_with_retry() wraps a single download_video()/download_audio()
+call, retrying up to MAX_DOWNLOAD_ATTEMPTS (3) times on any
+DownloadStageError (network hiccups, transient extractor failures) but
+NEVER retrying a DownloadCancelled - the user asking to stop should stop
+immediately, not get retried behind their back.
+
+cleanup_partial_files(out_dir, name) is called whenever a download is
+cancelled mid-way. It only ever deletes files matching "{name}.*" in
+that folder - since `name` is the exact, unique-per-item filename base
+yt-dlp was told to use (see make_unique_name), this can never accidentally
+touch a sibling item's already-completed file in the same batch/playlist
+run, even though they're all sitting in the same folder. This was
+specifically tested (see the test history in this conversation) with two
+completed items and one cancelled item all in the same directory, to
+confirm only the cancelled one's files get removed.
+
+
+23. PLAYLIST AUTO-CREATION (gui/app.py's _run_playlist)
+------------------------------------------------------------------
+When "Download playlist" is on, the download flow takes a completely
+different path (_run_playlist instead of _run_single): it first calls
+core/downloader.py's fetch_playlist_info(), which looks up the
+playlist's own title plus every entry's title/URL without downloading
+anything. A new playlist is created via core/playlists.py's
+create_playlist(), named after the playlist's own title - or, if the
+site didn't report one, the first entry's title instead. Every entry
+then downloads straight into that playlist's own folder
+(self._playlist_folder()), and gets registered into the playlist via
+add_to_playlist() as each one finishes successfully.
+
+
+24. THE LOG'S BACKING LIST + COLOR CODING (gui/app.py's _log)
+------------------------------------------------------------------
+self._log_entries holds every log line ever written this session as
+(level, message, color) tuples - level is "simple"/"detailed"/"developer",
+color is None or one of "green"/"red"/"blue". The visible CTkTextbox is
+just a filtered VIEW of this list at the currently-selected mode:
+switching the Log Mode dropdown calls _on_log_mode_changed(), which wipes
+the textbox and re-renders every entry whose level is at or below the
+new mode - so switching to Detailed retroactively reveals detail-level
+lines that were already logged while in Simple mode, rather than only
+affecting future lines. clear_log() empties both the textbox AND this
+backing list together - if it only cleared the textbox, switching modes
+afterward would silently bring the "cleared" lines back.
+
+Color tags (green="#2fa84f", red="#c0392b", blue="#3b8ed0") are applied
+via CTkTextbox's own tag_config/insert-with-tag mechanism, lazily created
+the first time each color is actually used. "Done: <path>" lines are
+green, any error message is red, and a "Downloading..." line right
+before each retry-wrapped download call is blue - wired directly into
+_run_single/_run_batch/_run_playlist.
+
+The "Developer" log mode option is gated behind the
+dev_log_mode_enabled toggle in the Developer tab - it simply doesn't
+appear in the mode dropdown's choices until a developer turns it on, same
+as the Developer display mode for Request History (dev_request_mode_enabled).
+
+
+25. DEVELOPER TAB IS DYNAMIC, NOT PERMANENT
+------------------------------------------------------------------
+Unlike the old version of this app (which had a permanently-visible "Dev"
+tab with a password gate built into it), the Developer tab now genuinely
+does not exist in the tabview until a correct login happens on the
+Extras tab. _dev_login_clicked() checks credentials via
+core/dev_access.py's check_dev_credentials() (which checks both the
+built-in account and any accounts granted via the Grant Developer Access
+section), and only on success calls self.tabview.add("Developer") for
+the first time ever, or just switches back to it if it was already built
+this session. Logging out calls self.tabview.delete("Developer") - the
+tab is completely gone again, not just hidden/disabled.
+
+core/dev_access.py stores any additionally-granted developer accounts in
+their own file (<app_dir>/options/dev_access.json), password-hashed
+(SHA-256, salted with a fixed app-specific string - a basic deterrent,
+not a claim of serious cryptographic security for a hobby project's
+local credentials file). Granting NEW access always requires the
+PRIMARY built-in password specifically - a granted account can't itself
+grant further access, which keeps the trust chain simple and bounded
+rather than open-ended.
+
+
+26. SMOOTH SCROLLING (gui/smooth_scroll.py)
+------------------------------------------------------------------
+Applied automatically to every CTkScrollableFrame anywhere in the app,
+including ones added in the future - patch_smooth_scrolling() (called
+once from core/bootstrap.py, before the App is constructed) wraps
+CTkScrollableFrame.__init__ itself, so no individual call site needs to
+do anything differently.
+
+The actual mechanism: rather than touching customtkinter's mouse-wheel
+event bindings directly (risky - re-implementing/overriding those means
+either duplicating internal logic that might change between customtkinter
+versions, or risking silently breaking scrolling entirely if a binding
+assumption turns out wrong), it patches the underlying
+canvas.yview_scroll() method that those bindings ultimately call. A
+request to scroll by N units gets split into N individual 1-unit steps,
+each fired ~8ms apart via .after() - the same total scroll distance,
+delivered as a short animated glide instead of one instant jump. This
+works regardless of what triggered the scroll (mouse wheel, scrollbar
+drag, keyboard), since it intercepts at the mechanism level, not the
+input level.
+
+
+27. BACKGROUND COLOR + RESIZABLE LOG BOX (Settings tab)
+------------------------------------------------------------------
+Background color uses Python's own tkinter.colorchooser (stdlib, no new
+dependency) - _choose_background_color() opens the OS-native color
+picker, applies the chosen hex color immediately via
+self.configure(fg_color=...) on the root window, and saves it to
+cfg["background_color"] (None = use the current theme's own default,
+which is what "Reset to Default" restores). Applied again automatically
+on every future launch in App.__init__.
+
+The log box height slider (cfg["log_box_height"], default 140px) applies
+live via self.log_box.configure(height=...) as you drag it - not just at
+next launch, matching what a slider control should feel like. Since the
+Download tab's other rows are fixed-size and only the log row has grid
+weight, growing the log box simply claims more of whatever vertical
+space is available, which is what "resize the other contents based on
+the size of the log" works out to in a standard grid layout - the log
+grows/shrinks and everything above it stays put.
+
+
+28. YOUTUBE BOT-DETECTION HANDLING
+------------------------------------------------------------------
+YouTube sometimes responds to rapid or repeated download requests with
+"Sign in to confirm you're not a bot," refusing the download entirely.
+This is handled as its own distinct case throughout the download
+pipeline, not just another generic failure:
+
+  core/downloader.py:
+    - _is_bot_detection_error(exc) checks the exception text for this
+      specific message (both straight and curly-apostrophe variants,
+      since yt-dlp's own message uses a curly one).
+    - YouTubeBotDetectedError is raised instead of the usual
+      DownloadStageError when this is detected, in both
+      download_video() and download_audio()'s exception handlers.
+    - download_with_retry() explicitly never retries this exception
+      (alongside DownloadCancelled) - retrying a bot challenge 3 times
+      in a row accomplishes nothing but delay, since the block isn't a
+      transient network hiccup.
+    - _cookie_options(cookies_from_browser) builds yt-dlp's own
+      "cookiesfrombrowser" option - this is yt-dlp's actual documented
+      fix for this exact error: pulling cookies from an already signed-
+      in browser session makes requests carry a real identity instead
+      of looking anonymous/scripted. "none" (the default) changes
+      nothing from before.
+
+  gui/app.py:
+    - _handle_bot_detection(request_id, url) is the one shared handler
+      for all three download paths (_run_single, _run_batch,
+      _run_playlist). It logs a red-colored explanation, marks that
+      request item failed, and shows a yellow messagebox.showwarning()
+      (not a plain error) with a plain-language explanation and 3
+      concrete things that help: set Cookies from browser in Settings,
+      wait before retrying, or increase the batch delay.
+    - Critically, _run_batch and _run_playlist both `break` immediately
+      after calling this - the WHOLE batch/queue/playlist stops right
+      there, rather than continuing to the next URL and hitting the
+      identical wall (and identical popup) over and over. That's the
+      actual fix for "the log doesn't get flooded" - the flooding would
+      come from repeating the same failure N more times, not from a
+      single occurrence.
+    - Settings tab has two new controls: a Cookies from browser dropdown
+      (cfg["cookies_from_browser"], one of yt-dlp's own supported browser
+      names) and a Delay between batch/playlist items slider
+      (cfg["batch_delay_seconds"], 0-30s, default 3) - spacing requests
+      out is the other real mitigation, reducing how often this gets
+      triggered in the first place rather than just reacting to it after
+      the fact. The delay itself is implemented as short (0.25s) sleep
+      increments checked against the cancel flag each time, so a long
+      delay doesn't make the Cancel button feel unresponsive.
+
+If yt-dlp ever changes this error message's exact wording,
+_BOT_DETECTION_SIGNATURES in core/downloader.py is the one place to
+update - everything else keys off that check.
+
+
+29. DUPLICATE DOWNLOAD DETECTION (Settings > Advanced)
+------------------------------------------------------------------
+core/download_requests.py's find_previous_download(url, out_dir) scans
+every completed request for a prior SUCCESSFUL download of that exact
+URL into that exact output folder, and confirms the file is still
+actually there (a moved/deleted file no longer counts as a duplicate).
+Wired into all three download paths in gui/app.py (_run_single,
+_run_batch, _run_playlist) right after the output filename is decided -
+a match logs a blue "Skipped - already downloaded to..." line, marks
+the request item status "skipped" (a new status alongside pending/
+downloading/success/failed - see finish_request()'s overall-status
+calculation, which now treats all-success-or-skipped as an overall
+"success"), and moves on to the next item without attempting the
+download at all.
+
+Retrying a single URL from Request History (gui/request_history.py's
+_retry_url) never calls this check - it's a completely separate code
+path that has no reference to find_previous_download anywhere in it, so
+a retry always genuinely re-attempts the download regardless of this
+setting, exactly as asked for ("pressing retry download buttons
+completely bypass this").
+
+cfg["duplicate_detection_enabled"] (default True) is the toggle, in
+Settings > Advanced.
+
+
+30. GENERAL HISTORY SEARCH/FILTER/SORT
+------------------------------------------------------------------
+The General History subtab (History tab) now has the same
+search + sort + type-filter pattern as Request History
+(gui/request_history.py) and the pattern the future Media tab's library
+search is meant to reuse too - kept deliberately consistent rather than
+each history-like screen inventing its own filtering UI. Search matches
+against the entry's name (core/history.py's stored "name" field); Sort
+supports Newest/Oldest/Alphabetical A-Z/Z-A/Largest file size (computed
+live via os.path.getsize on entries whose file still exists - a
+since-deleted file sorts as smallest rather than crashing); Type filters
+to All/Video/Audio.
+
+
+31. TIMESTAMPS EVERYWHERE
+------------------------------------------------------------------
+General History already had a timestamp per entry (core/history.py's
+"date" field, shown in every row's subtitle alongside the colored status
+text) - that part didn't need changing. Request History did NOT show any
+timestamp anywhere, in any display mode - gui/request_history.py's new
+_timestamp_str(req) fixes that: finished_at once a request is done,
+falling back to created_at while still in progress. It's now included in
+all three display modes (Name, Detailed, Developer), not just buried in
+Developer mode - and the existing colored status-dot / red-error-text
+system was left completely untouched, this only adds the timestamp text
+alongside what was already there.
+
+
+32. THE REAL "MORE" TAB ICON
+------------------------------------------------------------------
+assets/more_icon.png is now the actual submitted icon (a circle with
+three dots) rather than the placeholder generated earlier - processed
+the same way as the other icons in this app: any pixel darker than
+mid-gray becomes the app's own gray accent color, everything lighter
+becomes fully transparent (so it sits cleanly on the sidebar's
+background regardless of light/dark theme), then cropped to content and
+resized to a clean 64x64 for a crisp render at the 18x18 size it's
+actually displayed at.
+
+
+33. VERSION-SAFE SETTINGS EXPORT/IMPORT (core/config.py)
+------------------------------------------------------------------
+Export writes a small wrapper around the settings, not just the raw
+config dict: {"_export_format_version": 1, "_exported_by_app_version":
+"1.2", "settings": {...}} - export_config_dict() builds this.
+_export_format_version is for THIS wrapper's own shape (bump it only if
+the wrapper structure itself ever needs to change); the app version is
+just informational, shown in the import report.
+
+merge_imported_config(imported) is what actually makes this
+version-safe in both directions, and it's built to need NONE of this
+metadata to work - a bare flat settings dict (the old, pre-wrapper
+format) or even a hand-edited JSON file with only two or three keys in
+it imports correctly too:
+  - Detects the wrapper (a "settings" key holding a dict) and unwraps
+    it; if that's not there, treats the whole file as a flat settings
+    dict directly - this is what makes an old export from before this
+    wrapper existed still import cleanly.
+  - Every key that's a KNOWN setting (exists in DEFAULT_CONFIG) and
+    type-compatible with its default is applied. A settings file never
+    needs to contain every key - anything missing is simply left at its
+    current/default value, never an error.
+  - A key that exists in DEFAULT_CONFIG but has an incompatible type in
+    the imported file (e.g. a string where a bool is expected) is
+    skipped, keeping the safe default, rather than risking the app
+    breaking on a value shaped differently than it expects.
+  - A key that ISN'T recognized by this version at all (e.g. a setting
+    a NEWER version of the app added, being imported into an OLDER one)
+    is preserved as-is in the merged config rather than silently
+    dropped - so if the app is updated later and that setting becomes
+    meaningful, it's still there.
+  - Returns (merged_config, report) - report is a list of short,
+    human-readable strings (how many settings were missing/filled from
+    defaults, how many were unrecognized-but-preserved, which specific
+    ones were type-mismatched and skipped) shown to the user via a
+    popup after import, so a partial or cross-version import is never
+    silent about what actually happened.
+
+Only raises (ValueError) if the imported data isn't usable as a settings
+source at all - not a JSON object/dict. Everything else - missing keys,
+extra keys, wrong types, wrapped or unwrapped format - is handled
+gracefully rather than treated as an error.
+
+
+34. IMPORTING AN EXISTING FOLDER AS A PLAYLIST
+------------------------------------------------------------------
+core/playlists.py's import_folder_as_playlist(root, source_folder) turns
+any existing folder on disk into a new playlist - named after the
+folder itself (deduplicated with "(2)", "(3)" etc if that name's
+already taken, same collision handling as create_playlist), with every
+file directly inside it COPIED (never moved - the original folder is
+left completely untouched) into the new playlist folder. Like every
+other playlist operation in this app, it only looks at files directly
+in the folder, not subfolders - consistent with playlist_contents() and
+the rest of the filesystem-based playlist model.
+
+Wired into the Playlists tab as an "Import Folder..." button right next
+to "+ New Playlist" - opens a folder picker, imports it, logs a summary
+(how many files were copied, or a warning if some couldn't be), and
+auto-selects the new playlist so it's immediately visible without an
+extra click. Same no-default-folder guard as regular playlist creation
+(playlists need somewhere to live).
+
+
+35. THE MEDIA TAB (Playlists renamed, plus a new Library subtab)
+------------------------------------------------------------------
+The tab that used to just be "Playlists" is now "Media", with an inner
+CTkTabview holding two subtabs: "Playlists" (exactly what was there
+before - gui/app.py's old _build_playlists_tab is now
+_build_playlists_subtab, content untouched, just relocated) and the new
+"Library" subtab.
+
+core/media_library.py is the actual engine behind Library - built for
+someone managing a lot of different KINDS of files, not just this app's
+own video/audio downloads:
+  - CATEGORY_EXTENSIONS covers Video/Audio/Image/Document/Archive/Code,
+    with anything else falling into "Other" - categorize(filename)
+    determines this from the extension alone (cheap, no file-content
+    inspection).
+  - _relevance_score(filename, query) is a deliberately simple ranking
+    (no fuzzy-matching library dependency): exact filename match scores
+    highest, then starts-with, then substring, then partial word-overlap
+    - 0 means "doesn't match this query at all" and gets excluded.
+  - scan_library(directories, query, category_filter, max_results) is
+    where the actual speed requirement lives: it STOPS walking
+    directories the moment it's collected max_results matches, rather
+    than scanning everything and truncating afterward - a real
+    trade-off (approximate results for speed on a huge library) that
+    was explicitly asked for, not an implementation shortcut. Skips
+    hidden files/folders (dotfiles), handles a missing/deleted directory
+    in the configured list the same "never an error" way every other
+    filesystem-backed feature in this app does.
+
+Settings > Media Library (Advanced section area) is a plain add/remove
+list of folders (cfg["media_library_directories"], empty by default -
+deliberately NOT auto-populated with this app's own download folders,
+since someone managing lots of file types may want entirely different
+folders scanned) - a folder that's since been deleted/moved shows in red
+with "(not found)" rather than silently vanishing from the list, so it's
+obvious why it's not turning up results.
+
+The Library subtab itself has: a search box, a Sort dropdown (Best
+match/Name/Date modified/size, both directions where relevant), a Type
+filter (same categories as above), and the max-results slider itself
+(cfg["media_library_max_results"], 10-1000, default 200) - changing it
+immediately re-runs the search, and the status line under the results
+explicitly says when a search hit that cap, so it's clear when raising
+the limit might surface more. Each result row shows category, formatted
+size, modified date, and full path, with Open (file-type-aware, same
+open_media_smart() used elsewhere - video/audio to VLC, everything else
+to the OS default) and Location (open_folder() on the containing
+directory) buttons, matching the pattern already established in
+Playlists/History.
+
+
+36. ESTIMATED COMPLETION TIME (individual item + whole queue)
+------------------------------------------------------------------
+gui/app.py's _format_eta(seconds) turns a raw seconds count into a
+short human string ("45s", "3m 12s", "1h 05m"), returning None for
+anything nonsensical (negative, absurdly large from a speed spike) so
+callers just show nothing rather than a misleading number.
+
+Two independent things feed the combined ETA label (self.eta_label,
+next to progress_label/queue_progress_label on the Download tab):
+  - Per-item: self.downloader.last_eta_seconds, which core/downloader.py
+    was already computing per-hook-call (remaining bytes / current
+    speed, falling back to yt-dlp's own 'eta' field) - this was already
+    there, just not surfaced in the UI before.
+  - Whole queue: self._batch_item_durations (a list of completed items'
+    real elapsed_seconds() from THIS run only - reset at the start of
+    every _run_batch/_run_playlist call) and self._batch_items_remaining
+    (decremented after every item, success/fail/skip alike). The
+    estimate is average-completed-duration * items-still-to-start, plus
+    whatever's left of the CURRENT item (its own last_eta_seconds, or
+    the average if that's not available yet). Both get reset to empty/0
+    in _set_downloading_state(False) once a run ends, and initialized in
+    __init__ so single downloads (which never touch these) don't hit an
+    AttributeError from _update_eta_label() checking them.
+
+_update_eta_label() is called from _set_progress() (i.e. every progress
+hook tick, same cadence as the percentage/speed display already
+updates), building the combined string as "~Xs left | ~Ys for whole
+queue" - the whole-queue half only appears when there's actually
+tracking data to estimate from (single downloads and the very first
+item of a run just show the per-item half).
+
+
+37. CANCEL CLEANUP - RETRY WITH BACKOFF FOR LOCKED FILES
+------------------------------------------------------------------
+core/downloader.py's cleanup_partial_files(out_dir, name) used to try
+deleting each matched partial file exactly once, silently giving up on
+any OSError. The real problem: a cancel doesn't instantly release the
+file - the DownloadCancelled exception has to unwind back up through
+yt-dlp's own internals before it actually closes whatever handle it had
+open, and on Windows specifically a file can't be deleted at all while
+still open (unlike POSIX) - so a single immediate delete attempt right
+after cancelling could genuinely fail with "file in use" even though
+the file really was abandoned and safe to remove a moment later.
+
+Now retries each file up to 6 times with a 0.2s delay between attempts
+before giving up on it, and returns (removed, still_locked) instead of
+just a flat list - callers (all 3 cancel-handling sites in gui/app.py)
+now tell the user explicitly if something genuinely couldn't be cleaned
+up (still locked by another process entirely, e.g. antivirus scanning
+it) rather than that being silent. Verified with a mock that fails the
+first 2 delete attempts before succeeding (retry actually recovers) and
+a mock that never succeeds (correctly reported as still_locked, not
+silently dropped).
+
+
+38. MEDIA LIBRARY: DELETE BUTTON + DUPLICATE DETECTION
+------------------------------------------------------------------
+Delete button on every Library search result - a REAL, permanent delete
+of the file at that path (not a "remove from view"), confirmed first
+since there's no undo.
+
+Duplicate detection is a new "Duplicates only" option in the Library's
+existing Sort dropdown (core/media_library.py's SORT_MODES), not a
+separate button - selecting it re-filters the current search results
+down to just the ones that have at least one match elsewhere in the
+results.
+
+_quick_fingerprint(path) is deliberately NOT a full-file hash - hashing
+every byte of potentially huge video files across a large library would
+be slow. Instead: file size + an MD5 of just the first and last 1MB.
+Verified this correctly avoids false positives (two files of the exact
+same size but genuinely different content do NOT get flagged) while
+correctly catching real duplicates (byte-identical files do). Files
+sharing a fingerprint get grouped with a shared duplicate_group number,
+shown in each result's subtitle so it's clear which files match which
+when there's more than one duplicate set in the results.
+
+
+39. MEDIA LIBRARY: RECURSIVE DISCOVERY PREVIEW + GLOBAL SUBFOLDER TOGGLE
+------------------------------------------------------------------
+core/media_library.py's discover_subdirectories(directory) lists a
+folder's subdirectories (capped at depth 3 / 50 results, so a folder
+with thousands of nested directories doesn't hang the Settings tab
+building this) - shown as small gray "contains: sub1, sub2, ..." text
+under each folder in Settings > Files > Media Library Folders, purely
+informational: confirms what's actually in a folder before deciding
+whether to scan into it.
+
+The actual behavioral control is cfg["media_library_include_subfolders"]
+(default True) - ONE global switch in that same Settings section
+("applies to every folder above", per how this was asked for - not a
+per-folder setting). scan_library() now takes an include_subfolders
+parameter; when False, it clears os.walk's dirs list on every
+iteration, which stops it from descending into ANY subdirectory at all,
+restricting every configured folder to just its own top-level files.
+Verified both states directly: recursive scan finds nested files,
+non-recursive scan correctly excludes them.
+
+
+40. WEIGHTED MULTI-FIELD SEARCH + SPECIAL-CHARACTER-SKIP SORTING
+------------------------------------------------------------------
+core/utils.py's weighted_match_score(query, name, url, extra_fields)
+and strip_leading_special(text) are the shared engine behind General
+History's and Request History's search+sort - built once, used by
+both, so they can't drift apart the way two separate implementations
+eventually would.
+
+weighted_match_score: a match in `name` ALWAYS outranks a match in
+`url`, which ALWAYS outranks a match anywhere in `extra_fields` (a list
+of secondary strings - status, error message, request id, file type,
+per-item names, whatever's relevant) - via a tiered scoring scheme
+(name: 200-240, url: 100-140, extra: 0-40) where even the weakest
+possible name match outscores the strongest possible url/extra match.
+Within a tier: exact match > starts-with > substring > partial word
+overlap. Deliberately does NOT strip special characters - searching
+".com" or ".org" needs those literal characters to actually match.
+Returns 0 for "doesn't match anywhere."
+
+strip_leading_special: the OPPOSITE behavior, used only for alphabetical
+SORTING - drops leading non-alphanumeric characters so "[Cool] Video"
+sorts under "C" rather than "[". Never applied to search text, only to
+sort keys - kept as two clearly separate functions rather than one
+flag-toggled function, so it's structurally impossible to accidentally
+apply the sort-stripping behavior to a search query or vice versa.
+
+Both gui/app.py's General History and gui/request_history.py's Request
+History now: score+sort every entry/request by weighted_match_score
+when a search is active (replacing the old "does the name contain
+this substring" check), and use strip_leading_special() in every
+alphabetical sort mode. "Oldest first" in General History was also
+fixed to do a real chronological sort on the stored date rather than
+reversed()-ing the current list order, which would have silently broken
+once a search had already reordered that list by relevance.
+
+Verified via direct unit tests (name-vs-url-vs-extra tier ordering, no
+false positives, ".com"/".org" search still works) AND full GUI-level
+tests confirming a name match actually renders before a url match in
+both History subtabs' rendered widget text, plus the alphabetical sort
+correctly ignoring a leading "[" bracket.
+
+
+41. GENERAL HISTORY: LIVE PER-STAGE STATUS (Analyzing -> In Progress -> Success/Failed)
+------------------------------------------------------------------
+core/history.py's add_entry() now returns the new entry's id (instead of
+the whole history list, which nothing was actually using), and there's
+a new update_entry(entry_id, **fields) that mutates an existing entry
+in place. This is what makes a single download show up in General
+History the INSTANT it starts (as "Analyzing", using the URL itself as
+a placeholder name until the real title is fetched) and progress
+through its real stages in that SAME entry, rather than only ever
+appearing once, right at the very end, as a single final result.
+
+gui/app.py's _run_single/_run_batch/_run_playlist all follow the same
+sequence now: add_entry(..., "Analyzing") right when a URL starts being
+processed -> update_entry(name=...) once the real title's known ->
+update_entry(status="In Progress") right before the actual download
+call -> update_entry(status=<final>) in every terminal branch (success,
+cancelled, bot-detected, cookie error, stage error, unexpected error,
+skipped-duplicate). A self.after(0, self._refresh_history_tab) follows
+every one of these so the History tab's colors/text genuinely update
+live if it happens to be open during a download, not just once
+everything's finished.
+
+Status color map (_refresh_history_tab): Analyzing/In Progress = blue
+(#3b8ed0), Success = green (#2fa84f), Failed = red (#c0392b), Cancelled
+= orange, Skipped (duplicate) = gray, and Paused = dark gray (the color
+is wired in for when pause/resume gets built, even though nothing sets
+that status yet).
+
+Verified with a real download simulation that snapshots history state
+mid-download (confirming it genuinely reads "In Progress" DURING the
+call, not just after), confirms exactly one entry exists throughout
+(no duplicate entries per stage), and confirms every status color
+renders correctly by finding the actual subtitle label in the rendered
+widget tree (not just checking the underlying data).
+
+
+42. DRAFT TEXT-FIELD AUTOSAVE (1-hour freshness window)
+------------------------------------------------------------------
+core/draft_state.py is a small, separate JSON file (not part of
+config.json - this is transient scratch state, not a real setting) that
+saves the Download tab's in-progress text fields (URL, name, output
+folder, batch queue contents, queue name) on every regular auto-save
+tick, tagged with a timestamp. On the next launch, if that timestamp is
+within 1 hour, the fields are restored and a log line confirms it; if
+more than an hour has passed, load_draft_state() discards the file
+itself and returns None - a stale URL/name typed over an hour ago is
+more likely to be leftover clutter than something still wanted.
+Nothing is saved at all if every field was empty (no point persisting
+"nothing").
+
+Verified with the full real cycle: type into fields on one App
+instance, let a save tick fire, destroy it, construct a genuinely new
+App instance (simulating a real relaunch) and confirm the fields come
+back exactly as typed - plus confirmed an artificially-aged (2-hour-old)
+draft is correctly rejected and leaves the fields empty, not restored.
+
+
+43. COMPREHENSIVE SETTINGS EXPORT (history + request history bundled)
+------------------------------------------------------------------
+export_config_dict() now also bundles core/history.py's full history
+list and core/download_requests.py's full requests data (both
+in_progress and completed, plus the type_counters used for request-id
+numbering) alongside the settings themselves - opt-out via
+include_history=False if ever needed, but on by default since "make
+updating more seamless" was the whole point.
+
+Playlists and Media Library folders are NOT duplicated into the export
+as data - they're real files/folders on disk, and copying media file
+data through a JSON settings file isn't practical. Instead, the PATHS
+to them (playlists_path, media_library_directories) are already part of
+the regular settings, so pointing a fresh install at the same locations
+picks them back up automatically without needing anything extra here.
+
+merge_imported_config() now MERGES imported history/request data into
+whatever's already on the current install, rather than overwriting it -
+existing entries are matched by their own id (history entries) or
+request_id (requests) and never duplicated or lost; only genuinely new
+ones get added. This matters specifically because import could
+reasonably happen on an install that's already been used for a while
+(not just a totally fresh one) - a destructive replace would have been
+a real way to lose data. type_counters get merged by taking the higher
+of the two per type, so future new requests don't collide with ids from
+the imported set. The import report shown to the user was extended to
+say exactly how many history entries and requests were merged in.
+
+Verified via a full round-trip test: export real history+request data,
+add MORE history to simulate the install having grown since the
+export, then import the OLD export back in and confirm both the
+original and newly-added entries survive intact (nothing lost, nothing
+duplicated) - plus the same flow verified through the actual GUI Export
+Settings / Import Settings buttons, confirming the file really contains
+this data and the shown report mentions it.
+
+
+44. FFMPEG BUNDLING + INSTALLER-STAGED SETTINGS IMPORT
+------------------------------------------------------------------
+core/dependencies.py's check_ffmpeg() now checks three locations in
+order: the AppData copy this app may have already downloaded at
+runtime (unchanged, existing behavior), a copy BUNDLED with the
+installer next to the app's own .exe (via core/paths.py's install_dir()
+- see installer.iss's vendor\ffmpeg\bin\ [Files] entry, which needs
+real ffmpeg.exe/ffprobe.exe binaries placed there before compiling; the
+skipifsourcedoesntexist flag means the build still succeeds if that
+folder's empty, just without this benefit), then finally the system
+PATH. Found and fixed a real bug while wiring this in:
+core/downloader.py's _ffmpeg_options() was unconditionally pointing
+yt-dlp at the hardcoded AppData FFMPEG_DIR regardless of where
+check_ffmpeg() actually found it - meaning even the pre-existing
+system-PATH fallback was silently broken for this specific setting.
+Now uses os.path.dirname() of whatever path was actually found.
+
+installer.iss's CurStepChanged (ssPostInstall) offers to import a
+previously-exported settings file, but ONLY on a genuinely fresh install
+(the AppData folder doesn't already exist) - an upgrade over an existing
+install skips this entirely, since there's nothing to protect against
+being silently overwritten if it did. The chosen file is copied to
+%APPDATA%\Media Downloader\options\pending_import.json - Inno Setup's
+Pascal Script can't run the app's own Python import/merge logic
+directly, so this just stages the file for the app to pick up itself.
+
+core/config.py's check_and_apply_pending_import(), called once from
+App.__init__ right after the normal config load, looks for that staged
+file, merges it in via the SAME merge_imported_config() the in-app
+Import Settings button uses (settings merged with defaults for missing
+keys, history/requests merged not overwritten), then deletes the marker
+file so it's only ever applied once. A completely ordinary launch with
+nothing staged is a clean no-op.
+
+Verified with three levels of testing: the merge/apply logic directly,
+the full stage-file -> detect -> apply -> delete-marker cycle in
+isolation, and finally through an actual App() construction to confirm
+it's wired correctly into real startup (cfg reflects the staged values,
+marker file is gone afterward).
+
+As with every other installer.iss change this project has needed: I
+cannot compile-test Inno Setup scripts in this environment. The Pascal
+Script here follows the same patterns already used successfully
+elsewhere in this file (BrowseForFolder, DirExists/CreateDir, MsgBox),
+but a real test compile is still warranted before relying on it.
+
+
+45. URL SCRAPER (More > URL Scraping) + THE "ADVANCED SELECTING" SYSTEM
+------------------------------------------------------------------
+The More tab is now two subtabs: "Information" (everything that used to
+just BE the More tab - disclaimer, dev login, uninstall - moved
+verbatim, now the default landing subtab) and "URL Scraping" (new).
+
+core/url_scraper.py uses a REAL headless Chromium via Playwright (not a
+plain HTTP+HTML-parse approach) specifically because a lot of sites load
+media dynamically via JavaScript, streaming manifests, or content that
+only ever appears as a network response - a static HTML parse would
+miss all of that. scrape_media_urls() collects from two independent
+sources: every <video>/<audio>/<source> element's LIVE src (read after
+JS has run, catches dynamically-added elements too) and every network
+response whose content-type is video/* or audio/*. Verified against a
+real local HTML fixture with actual Chromium (not mocked) - correctly
+found a video added by a setTimeout()-delayed script, proving the
+JS-execution requirement is genuinely being met, not just assumed.
+fetch_titles_for_urls() is a deliberately separate second stage (yt-dlp
+looks up each URL's real title) - matching exactly how this was asked
+for: scrape first, fetch names second, only THEN show anything.
+
+gui/advanced_select.py is the new shared multi-select mechanism -
+internally and consistently called "Advanced Selecting" in code/
+comments per how this was asked to be named for future reuse.
+AdvancedSelector tracks enabled state + which item ids are selected;
+build_selection_toolbar() renders the standard toggle + Select All +
+Clear + bulk-action-button row any screen can drop in. Built first for
+the URL Scraper's results (checkbox per result when enabled, Select
+All, bulk Download Selected / Copy Selected) - this is the SAME
+mechanism meant to eventually replace the separate delete/copy/retry
+button patterns elsewhere in the app (History, Request History,
+Playlists), not a one-off for this screen. That broader replacement is
+still a separate, not-yet-done task - this round only actually wired it
+into the URL Scraper.
+
+Downloading scraped items (single or multi-select) hands off to the
+Download tab per how this was asked for: type (Video/Audio) is set to
+match what's actually being downloaded, multiple URLs switch to Batch
+Queue with them newline-separated (ready for the existing batch
+parser), a single URL switches to Single Download with the URL and
+beautified name pre-filled.
+
+Verified with real Chromium end-to-end through the actual GUI code
+path (not just the scraper module in isolation): video/audio type
+filtering, Select All, bulk download correctly switching tabs/sub-tabs
+and populating fields, bulk copy to clipboard, and the single-item
+download path - all against a real local HTML fixture, not mocked
+responses.
+
+Added playwright>=1.40.0 to requirements.txt. Note for building: `pip
+install -r requirements.txt` alone does NOT download the actual browser
+binary - `playwright install chromium` needs to be run once after that
+(this environment already had it available; a fresh install elsewhere
+will need this step, and the installer/build process should account
+for bundling or documenting it before shipping to end users).
+
+
+46. RENAMABLE REQUESTS + REQUEST DETAIL WINDOW SHOWS THE REAL NAME
+------------------------------------------------------------------
+core/download_requests.py's rename_request(request_id, new_name) works
+on a request in either bucket (still in progress or already completed)
+- can be renamed at any point in its life. An empty new_name clears the
+custom name, falling back to the usual "first downloaded item's title"
+display logic. Wired into the request detail dialog
+(gui/request_history.py's open_request_detail) as a Rename/Save toggle
+next to the title.
+
+Found and fixed a related gap while doing this: the detail dialog's
+title was showing the raw internal request_id (e.g.
+"video_queue_download-5") instead of a human-readable name - moved the
+request_id down into the smaller subtitle as secondary info, and the
+title now always shows the actual display name (custom name if set,
+otherwise the first downloaded item's title).
+
+
+47. SLIDERS AT 25% OF WINDOW WIDTH
+------------------------------------------------------------------
+New App._slider_width() helper (max(150, int(self.winfo_width() * 0.25))
+- a sensible floor so a slider never becomes unusably tiny on a small
+window) applied to all 6 sliders in the app. Computed once at
+construction time (when each tab is built), not re-computed live on
+window resize - a deliberate simplicity/artifact-avoidance tradeoff,
+not an oversight.
+
+
+48. VLC "OPENS BUT DOESN'T PLAY THE FILE" - ACTUAL FIX
+------------------------------------------------------------------
+core/utils.py's open_in_vlc() now launches with --no-one-instance
+--no-playlist-enqueue. The real cause: VLC's default single-instance
+behavior hands a new file off to an ALREADY-RUNNING VLC window as a
+playlist addition rather than playing it immediately - which reads as
+"VLC opened but the specific file never played," or even as if it just
+opened to a generic view instead of the requested file. Forcing a
+genuinely dedicated instance per call means the requested file always
+actually starts playing, regardless of whether another VLC window
+happens to already be open. Verified the Popen argument construction is
+correct (flags + path passed as separate list elements, space-safe) -
+could not test against a real installed VLC binary in this environment,
+worth a real-world check on your end.
+
+
+49. MEDIA LIBRARY: FIXED THE SLIDER-DRAG RENDERING STORM
+------------------------------------------------------------------
+_on_library_max_results_changed() is debounced now (300ms) instead of
+triggering a full library re-scan on every single slider tick.
+CTkSlider's command fires continuously while dragging, not just on
+release - dragging across a wide range used to trigger a real
+filesystem scan for every intermediate value passed through along the
+way, exactly the "renders thousands of intermediate results before
+getting to what I actually wanted" bug. Now each tick cancels any
+already-scheduled scan and reschedules a new one; only the LAST value,
+once dragging actually pauses, triggers a real scan. Verified directly:
+zero scans fire during a simulated 20-tick rapid drag, exactly one scan
+fires (using the final value) once the drag settles.
+
+
+50. ADVANCED SELECTING ROLLOUT COMPLETE (General History, Playlists, Request History items)
+------------------------------------------------------------------
+Finished rolling the shared Advanced Selecting system (gui/advanced_select.py,
+built originally for the URL Scraper) out to every delete/copy/retry
+surface in the app, per how this was specifically asked for:
+
+  - General History: the per-row Delete button is gone. Selecting mode
+    off = no delete control at all; on = checkbox per row, Select All,
+    bulk Delete Selected (_delete_selected_history_entries).
+  - Playlists: same pattern - the per-row "Del" button only shows when
+    selecting mode is OFF; a checkbox replaces it when selecting mode
+    is on, with Select All / bulk Delete Selected
+    (_delete_selected_playlists).
+  - Request History's per-URL rows (inside the request detail dialog):
+    individual Copy Link/Retry buttons are KEPT regardless of selecting
+    mode (a single quick action shouldn't require turning on bulk mode
+    first) - but a checkbox appears alongside them when enabled, with
+    Select All / bulk Copy Selected / bulk Retry Selected added above
+    the list. Bulk retry reuses the exact same _retry_all_thread /
+    reopen_for_retry machinery Retry All already used, so there's still
+    only one retry code path in the whole app, not a second one for
+    the selective case.
+
+Verified all three with real tests, not just "it compiles": checkboxes
+correctly absent by default and appearing when enabled, Select All
+selecting everything currently visible, bulk delete removing exactly
+what was selected (General History, Playlists), and for Request
+History specifically - bulk copy landing only the selected URLs on the
+clipboard (confirmed a THIRD, unselected item does NOT show up) and
+bulk retry correctly resetting only the selected items' status back to
+pending.
+
+
+51. SAVE STATUS INDICATOR
+------------------------------------------------------------------
+New self.save_status_label, always visible under the mini log echo
+below the "Media Downloader" title (not gated to non-Download tabs the
+way the log echo above it is). Two-part behavior, per how this was
+specifically asked for:
+  - Flips to "Not saved" (orange) the INSTANT a tracked field actually
+    changes - _mark_save_dirty(), bound via <KeyRelease> to every field
+    the draft-state autosave already tracks (URL, name, output folder,
+    queue name, batch box) via _bind_save_status_tracking(), called
+    once after the Download tab's widgets are all built.
+  - Only flips back to "Up to date" (gray) after 3 consecutive auto-save
+    cycles pass with nothing NEW marked dirty in between -
+    _update_save_status(), called from _autosave_tick right after the
+    real save already happened. A fresh edit at any point resets the
+    counter back to 0, so it stays "Not saved" for as long as the user
+    is actively typing, not just flickering between saves.
+Verified the full state machine directly (starts clean, dirties
+instantly, stays dirty through 2 clean cycles, clears on the 3rd, a
+new edit resets the counter even mid-recovery) plus confirmed with a
+REAL Tk <KeyRelease> event on url_entry that the binding is actually
+wired, not just the underlying function.
+
+
+52. MEDIA LIBRARY: INLINE "CONFIRM?" DELETE FOR DEFAULT-FOLDER FILES
+------------------------------------------------------------------
+_is_in_default_download_folder(path) checks whether a file lives inside
+one of the app's own configured folders (download_root, video_path,
+music_path). For files there, _delete_library_file_clicked() replaces
+the popup confirmation with a lower-friction inline pattern: first
+click turns the Delete button itself into a blue "Confirm?" (reverting
+back to plain "Delete" after 4s if never actually confirmed, so an
+accidental first click doesn't leave a live Confirm? button sitting
+there), second click actually deletes. A file anywhere ELSE on disk
+still goes through the full askyesno popup confirmation regardless -
+per how this was specifically asked for, this shortcut is deliberately
+scoped to the app's own default locations only, not a general "make
+deleting easier" change. Verified both paths directly: a default-
+folder file's first click shows zero popup and doesn't delete yet, the
+second click does; a file outside those folders still triggers the
+popup on the very first click.
+
+
+53. REQUEST HISTORY: REAL FONT/COLOR HIERARCHY ACROSS DISPLAY MODES
+------------------------------------------------------------------
+gui/request_history.py's _request_display_text() (returned one flat
+multi-line string, rendered in a single font/color regardless of how
+many "tiers" of info it contained) is now _request_display_parts(),
+returning (name_text, detail_lines, dev_lines) as three separate
+pieces instead. _build_request_row() renders each tier as its own
+CTkLabel(s): name always at font_normal (biggest), detail_lines at
+font_small + gray60 (Detailed and Developer modes both show these -
+Developer includes everything Detailed would, not just its own extra
+info, per how this was specifically asked for), dev_lines at font_small
++ gray50 (Developer mode only, a touch dimmer than the detail tier).
+Previously "Detailed" and "Developer" modes just picked font_small for
+the WHOLE multi-line block via a single label - there was no actual
+size or color hierarchy, despite lines being ordered as if there were.
+
+Verified this is real, not just structurally plausible: rendered an
+actual Developer-mode row and read back each label's font.cget('size')
+directly, confirming the name's font is genuinely larger than both the
+detail and dev-info fonts (not just visually similar), and confirmed
+the detail/dev-info labels use different, visibly dimmer colors than
+the name.
+
+
+54. DEV-LOGIN REDIRECT PROMPT (from outside the Developer tab)
+------------------------------------------------------------------
+Two new shared helpers in gui/app.py:
+  - _prompt_dev_login_redirect(feature_description): offers to take the
+    user straight to the login form (switches to More > Information,
+    opens the normally-collapsed login area, focuses the username
+    field) instead of just telling them where to go find it themselves.
+  - _prompt_dev_feature_redirect(feature_description): the gate for
+    anything needing a Developer-tab FEATURE TOGGLE (not just being
+    logged in) - branches correctly: not logged in at all -> the login
+    redirect above; already logged in but this particular toggle just
+    isn't flipped on yet -> redirects straight to the Developer tab
+    itself instead (a login-form redirect would be wrong/confusing for
+    someone who's already authenticated).
+
+Wired into both places in the app that gate a feature behind developer
+access from outside the Developer tab: the Download tab's "Developer"
+log mode option (_on_log_mode_changed, uses the feature-toggle gate)
+and Request History's "Developer" display mode
+(gui/request_history.py's on_mode_change, uses the login gate directly
+since it only checks authentication, not a separate toggle). Both used
+to just show a plain warning telling the user to go find the relevant
+UI themselves.
+
+Verified all three real paths: accepting the login-required prompt
+correctly lands on More > Information with the login area open and the
+username field focused; declining it leaves the user exactly where
+they were; and - after actually logging in through the real
+_dev_login_clicked flow (not just setting the internal flag directly,
+which would've left _dev_username unset and broken a later screen) -
+confirmed an already-authenticated user hitting the feature-toggle gate
+is redirected straight to the Developer tab, not asked to log in again.
+
+
+55. RESIZABLE DEV NOTES TEXTBOX (click-and-drag)
+------------------------------------------------------------------
+New App._make_vertically_resizable(widget, min_height, max_height)
+helper - adds a thin drag handle directly below any widget (built
+generically, not dev-notes-specific, so it's reusable elsewhere later),
+click-and-hold on the handle then drag up/down to resize it live.
+Wired into the Developer tab's dev_logs_box.
+
+The actual resize math (App._clamp_drag_height) is a standalone static
+method specifically so it's directly unit-testable - dragging via Tk's
+event_generate in a headless Xvfb environment doesn't reliably carry
+realistic root-coordinate deltas, which makes testing a full synthetic
+mouse-drag gesture unreliable in this environment regardless of whether
+the underlying code is correct. Tested three ways instead: the clamp
+math directly (normal, below-min, above-max), and the full real
+press->drag->release CALLBACK chain via test hooks the handle exposes
+(handle._resize_test_hooks) - confirmed dragging down by exactly 100px
+grows the textbox by exactly 100px, and that drag motion after release
+is correctly ignored (not still resizing after the mouse button is up).
+
+
+56. ACCESSIBILITY SECTION: SCROLL SPEED CONTROL
+------------------------------------------------------------------
+New "Accessibility" main section in Settings (after Advanced), with a
+"Scroll Speed" slider (2-40ms). gui/smooth_scroll.py's set_scroll_speed()
+updates the module-level _STEP_MS that the smooth-scroll animation reads
+fresh on every tick (not captured into a per-canvas closure at creation
+time) - meaning changing it affects every CTkScrollableFrame already on
+screen immediately, with no need to re-patch anything. cfg["scroll_speed_ms"]
+(default 8, matching the previous hardcoded behavior) is applied once at
+startup via core/bootstrap.py, right after patch_smooth_scrolling() sets
+up the mechanism it configures. Verified the full chain: a saved value
+of 25 is correctly applied via bootstrap before the App is even
+constructed, the Settings slider shows that correct value on load, and
+moving the slider live-updates the actual scroll mechanism, the label,
+and the saved config all at once.
+
+
+57. CLEAR-X BUTTONS ON EVERY SEARCH BAR
+------------------------------------------------------------------
+New App._add_search_clear_button(entry, string_var) - a small "X"
+button after any search entry that clears it, packed into the same
+parent right after the entry. Wired into all 4 search bars: Playlists,
+Media Library, General History, Request History.
+
+Named distinctly (not _add_clear_button) after discovering a real
+name collision: the Download tab already had an _add_clear_button
+method (used for the URL/Name/Output field clear buttons, a different
+shape - takes a widget + optional thumbnail-clear flag, uses grid()
+not pack()) that my first attempt silently shadowed by reusing the same
+name - Python just keeps whichever definition loads last. Caught
+immediately via a TclError crash (grid/pack conflict) the moment the
+Download tab tried to build. Renamed mine, fixed all 4 call sites.
+
+Verified all 4 new clear-X buttons individually, plus explicitly
+re-confirmed the original Download-tab clear-X (a completely separate,
+unrelated feature/button style) still works correctly after the rename
+- worth being upfront that reaching that confirmation took a few
+wasted rounds chasing what turned out to be test-construction mistakes
+on my end (grabbing the wrong button by list index when multiple
+identical-looking buttons exist on one tab), not real app bugs.
+
+
+58. ELEVATED-PERMISSIONS REDIRECT FOR OPENING FILES
+------------------------------------------------------------------
+core/utils.py's open_file() now returns (ok, message) instead of a
+plain bool, specifically distinguishing a PermissionError from any
+other failure (message == "permission_denied" as a sentinel). This
+required updating every call site that used the old boolean contract -
+8 total, across open_media_smart() itself (which also had an orphaned
+leftover code line from the edit, caught immediately by py_compile) and
+6 Developer-tab file-open buttons in gui/app.py, now consolidated
+through one shared _open_with_permission_redirect() helper instead of
+each repeating the same "if not open_file(path): warn" pattern.
+
+On a genuine permission error, the user is now offered to open the
+file's containing folder instead of just seeing "couldn't open this" -
+so they can actually do something about it (Properties > Security /
+Run as Administrator on Windows, Get Info on macOS, the file manager's
+permissions dialog on Linux). Any other failure (file missing, etc)
+still falls back to the plain not-found message each call site already
+had. The Media Library's own "Open" button (_open_media_or_warn) gets
+the same treatment for open_media_smart's permission_denied case.
+
+Verified thoroughly: open_file's PermissionError detection directly
+(distinct from a generic OSError, whose message is preserved), correct
+propagation through open_media_smart's two branches (no-VLC-fallback
+and non-media-file), and all 4 real GUI-level paths through
+_open_with_permission_redirect (yes -> opens the correct containing
+folder, no -> nothing opens, non-permission not-found -> plain warning
+with no redirect prompt, success -> nothing shown) - plus a matching
+test for the Media Library's own permission-redirect path.
+
+
+59. EXPORT SETTINGS: CONFIRM BEFORE INCLUDING FOLDER PATHS
+------------------------------------------------------------------
+_export_settings() now confirms with the user before including their
+actual filesystem paths (default download folder, video/music folders,
+Media Library folders) in an export file - these are real paths on
+their computer, which could reveal folder structure or a username if
+the file is later shared with someone else. The confirmation dialog
+lists the exact paths that would be included. Choosing yes exports
+everything as before; choosing no exports everything else with just
+those specific path fields blanked out (empty string / empty list),
+for the person importing to set themselves, rather than aborting the
+whole export.
+
+Verified both branches directly: yes correctly includes the real path
+values in the written file, no correctly blanks exactly those fields
+while leaving every other setting (e.g. video_quality) exported
+normally - confirmed by actually reading back the written JSON file in
+both cases, not just checking the function ran without error.
+
+
+60. ARCHIVED CONTENT FOLDER SYSTEM
+------------------------------------------------------------------
+core/paths.py's ensure_archived_content_folder(download_root) creates
+"Archived Content"/ under the default download folder, same pattern as
+the existing Playlists folder helper.
+
+core/playlists.py's delete_playlist() gained a dest_dir parameter
+(defaults to the parent Playlists folder, matching the old hardcoded
+behavior exactly, so nothing broke for existing callers) - pass any
+folder and that's where the playlist's files land instead of being
+deleted, reusing the existing _unique_dest() collision-naming helper
+rather than duplicating that logic.
+
+gui/app.py's _prompt_playlist_delete_destination() replaces the old
+plain yes/no delete confirmation with the multi-option dialog asked
+for: Archived Content, Videos folder, Music folder, a folder the user
+picks (via a real folder-browse dialog), or a genuine permanent delete
+(with its own extra confirmation, since that one's irreversible) - or
+Cancel. Wired into both _delete_playlist (single) and
+_delete_selected_playlists (bulk, via Advanced Selecting).
+
+Media Library gained a per-item "Archive" button (_archive_library_file)
+that moves a file - and any companion files sharing the same base name
+in the same folder (a thumbnail .jpg, a subtitle .srt, etc that belong
+to the same media item) - into Archived Content. Verified this doesn't
+accidentally sweep up an unrelated file that merely happens to share a
+folder, only ones sharing the exact base name.
+
+Verified extensively: all 5 playlist-deletion destinations directly
+(Archived Content, Videos, Music, custom folder, permanent delete all
+correctly move/remove files where expected), the full GUI dialog flow
+end-to-end (not just the underlying delete_playlist logic), and the
+Library archive button's companion-file grouping - confirmed it moves
+a video AND its matching thumbnail together, while correctly leaving
+a same-folder file with a different base name untouched.
+
+
+61. DYNAMIC BATCH QUEUE URL LIST (toggleable in Advanced settings)
+------------------------------------------------------------------
+New Settings > Advanced > "Use the dynamic URL list for Batch Queue"
+toggle (cfg["dynamic_batch_queue_enabled"], off by default - the plain
+textbox stays the default behavior, nothing changes unless this is
+turned on). Both UIs are built in the SAME grid cell in the Batch Queue
+subtab; _apply_batch_queue_mode() just swaps which one is visible via
+grid()/grid_remove() - no rebuilding needed when the setting changes.
+
+When on: an "Add" entry parses pasted text (even a large multi-line
+block) into individual URLs, each rendered as its own row in a
+scrollable list with a red X - clicking it removes that URL
+IMMEDIATELY, no confirmation prompt (per how this was specifically
+asked for, since it's undoable). Removed URLs go onto
+self._batch_undo_stack (a real LIFO stack, not just "last one") -
+an Undo button or Ctrl+Z (bound app-wide but only acts when Batch
+Queue's dynamic mode is actually the current view, so it doesn't
+interfere with normal text-field undo elsewhere) restores the most
+recently removed URL at its original position. The undo stack is only
+actually cleared once start_batch_download() genuinely creates the
+request - matching "not forgotten until the user creates the request"
+exactly - so a URL removed and then reconsidered can still be brought
+back any time before pressing Start Queue.
+
+start_batch_download() sources its URL list from self._batch_urls when
+dynamic mode is on, or the plain textbox parse when it's off - both
+paths converge into the same existing urls list before anything else
+in that function runs, so nothing downstream needed to change.
+
+Verified extensively: mode toggle correctly swaps visibility (confirmed
+via winfo_ismapped() after actually switching to the Batch Queue
+subtab, not just checking geometry-manager calls succeeded), multi-line
+paste correctly splits into separate entries, immediate no-prompt
+removal, undo restoring at the correct original index, Ctrl+Z firing
+correctly when that subtab is the active view, the ACTUAL download
+genuinely using the dynamic list's URLs (not the plain textbox, mocked
+and confirmed via which URLs the downloader was actually called with),
+the undo stack correctly clearing once the request is created, and the
+default (dynamic mode off) path confirmed completely unaffected.
+
+
+62. SPEED/ETA SAMPLING REFINEMENT - FULL INTEGRATION
+------------------------------------------------------------------
+Completes item 62 from the previous entry - core/speed_tracker.py's
+SpeedTracker is now actually wired into the download pipeline, not just
+built and unit-tested in isolation:
+
+core/downloader.py's Downloader gained speed_tracker (a SpeedTracker
+instance, reset at the start of every download_video/download_audio
+call) and an optional ping_ms_provider (a zero-arg callable). _hook()
+feeds every real speed reading into speed_tracker.add_sample() with the
+current ping, and last_eta_seconds is now computed from the SMOOTHED
+5-second average speed (falling back to the raw instant speed, then
+yt-dlp's own eta field, in that order) rather than the raw jittery
+reading directly.
+
+gui/app.py passes ping_ms_provider=lambda: self._network_ping at all 3
+Downloader() construction sites, reusing the ping core/network_status.py
+already measures periodically for the connection-quality indicator.
+Found and fixed a real bug while wiring this up: self._network_ping was
+never initialized in __init__, only ever set inside _apply_network_status
+(which only runs after the first periodic check completes) - a download
+started in the first few seconds after launch would have hit an
+AttributeError calling the ping provider. Now initialized to None
+alongside _network_tier.
+
+The displayed speed and ETA are no longer updated on every raw hook
+call - _set_progress() now only updates the progress bar/percentage
+immediately (that's an exact value with no reason to throttle), while a
+genuinely independent 1-second ticker (_tick_speed_display, started/
+stopped by _set_downloading_state) reads speed_tracker.get_average(5)
+and re-renders both the speed text and the ETA label on that cadence,
+per how this was specifically asked for ("updated every 1 second...
+reflects the average of the last 5 seconds").
+
+Verified extensively: the ping-provider fix directly (confirmed it
+returns None safely before any check has run, rather than crashing),
+realistic fluctuating samples correctly averaging to a sane smoothed
+value through the REAL _hook path (not a standalone SpeedTracker call),
+a genuine 50x outlier speed spike correctly rejected and the average
+staying sane, ETA genuinely reflecting the smoothed value, and the
+1-second ticker's start/stop lifecycle plus its actual rendered output
+("50.0% - 1.91 MB/s" for a real smoothed-average simulation).
+
+
+63. SIDEBAR COLLAPSE: FIXED - BUTTONS WERE DISAPPEARING ENTIRELY
+------------------------------------------------------------------
+Found and fixed the actual bug behind "when the sidebar collapses
+there are quite a few visual artifacts": toggle_sidebar() was calling
+pack_forget() on the WHOLE button_frame when collapsing - every single
+tab button (Download, Media, History, etc) disappeared entirely,
+leaving only the hamburger toggle button visible. This directly
+contradicted "keep the tab buttons visible and operational" - the old
+code didn't even attempt an icon-only collapsed state, it just hid
+everything.
+
+Rewritten so every button stays packed and visible the ENTIRE time -
+collapsing/expanding now only changes each button's own text/anchor/
+width (empty text + centered + narrow when collapsed, restored via a
+remembered _sidebar_full_text attribute when expanding), never its
+presence. This is also structurally what fixes the broader "visual
+artifacts" complaint: the old pack_forget()-then-repack cycle was a
+much bigger, messier state change than just reconfiguring existing
+widgets in place.
+
+A tab added WHILE the sidebar is already collapsed (the Developer tab,
+added dynamically on login, well after startup) now correctly picks up
+the collapsed icon-only style immediately rather than appearing with a
+text label that doesn't match the current state.
+
+Verified directly: every button remains winfo_ismapped()==True after
+collapsing (the actual bug, genuinely fixed - confirmed via
+winfo_ismapped(), not just checking pack() calls succeeded), text
+correctly empty while collapsed and correctly restored on expand, a
+collapsed icon-only button still switches tabs correctly when clicked
+(operational, not just visible), and the dynamically-added Developer
+tab case. A screenshot of the collapsed sidebar confirms all 6 icons
+render cleanly and consistently, matching what the tests already
+proved.
+
+
+64. HOVER/CLICK HINT ICONS - REPLACES ALWAYS-VISIBLE PARAGRAPH TEXT
+------------------------------------------------------------------
+New App._add_hint_icon(parent, text, wraplength=320) - a small, low-
+profile circular "?" that shows explanatory text on hover OR click
+(click toggles it - for anyone who finds hover awkward, e.g. touch/
+trackpad users, or just wants it to stay up while reading). This is
+the intended replacement for the old pattern of a permanently-visible
+paragraph of description text sitting under every setting, per "to
+minimize what the user sees."
+
+Converted a representative set of Settings' longer inline explanations
+to this pattern: Duplicate Detection, Background Downloads, Batch Queue
+(dynamic URL list toggle), and YouTube Bot Detection's section intro.
+Being honest that this is NOT a full sweep of every single explanatory
+text block in Settings (there are quite a few more scattered through
+Files, Appearance, Media Library, etc) - converting all of them is a
+large, repetitive mechanical task; these four are meant to demonstrate
+the pattern is solid and already reduces real visual clutter, not claim
+every possible conversion is done.
+
+_add_hint_icon exposes _hint_test_hooks (open_tip, close_tip, toggle_tip,
+tip_state) purely for direct testing - the same reasoning as the
+resizable-textbox's _resize_test_hooks earlier: Xvfb's synthetic
+<Enter>/<Leave> event dispatch turned out to be genuinely unreliable in
+this headless environment (confirmed via inconsistent results between
+identical runs), and more importantly, checking for new CTkToplevel
+windows via app.winfo_children() was fundamentally the wrong approach
+regardless of event reliability - a CTkToplevel doesn't show up in its
+parent's winfo_children() the way a packed/gridded child widget does.
+Once the test correctly checked the tooltip window's own existence
+(winfo_exists()) instead, every scenario passed cleanly: hover-open,
+hover-close, click-toggle-open, click-toggle-close, and no duplicate
+window created from calling open twice in a row.
+
+A screenshot of the Advanced section confirms the visual result:
+Duplicate Detection, Background Downloads, and Batch Queue all show a
+compact switch + small "?" icon instead of a permanent paragraph of
+text, and the underlying settings were confirmed to still function
+correctly (save to config, live-apply where relevant) after switching
+to this layout.
+
+
+65. SETTINGS/MORE ICONS REMADE - MORE IS NOW A GENUINE FULL CIRCLE
+------------------------------------------------------------------
+Both assets/settings_gear.png and assets/more_icon.png redrawn from
+scratch programmatically (PIL ImageDraw), replacing the old
+imported/processed versions, at the same size/gray/padding convention
+already used for every other tab icon (64x64, gray, ~12% padding).
+
+Settings: a clean stroke-style gear (8 teeth, hollow center), matching
+the line-art look of the other tab icons rather than the old chunkier
+imported shape.
+
+More: three dots drawn INSIDE an actual circle outline, so it genuinely
+renders as a full circle - per how this was specifically asked for -
+rather than three free-floating dots with no enclosing shape.
+
+No code changes needed - both files are saved directly to the exact
+paths the existing TAB_ICONS/_apply_tab_icon system already references,
+so they're picked up automatically. Verified via a real screenshot of
+the rendered sidebar: both new icons show correctly, sized and weighted
+consistently with the rest.
+
+
+66. LOADING DELAY SMOOTHING (toggleable in Developer tab)
+------------------------------------------------------------------
+New Developer tab section "Loading Delay" - a toggle plus a duration
+slider (100-2000ms), off by default. gui/sidebar_tabview.py's
+SidebarTabview now accepts an optional loading_delay_provider callable
+-> (enabled, delay_ms); set() calls it on every switch and, only when
+enabled, shows a brief neutral overlay over the content area for that
+duration before auto-hiding itself.
+
+Deliberately implemented as a PURELY VISUAL, additive overlay rather
+than an actual delay to the tab-switching logic itself - self._current
+and tkraise() still happen immediately and synchronously regardless of
+this setting. This was a deliberate design choice, not a shortcut: this
+whole session built dozens of tests throughout the app that call
+tabview.set(name) and immediately assert tabview.get() == name
+afterward - making set() itself actually asynchronous/delayed would
+have risked silently breaking all of that existing, already-verified
+behavior for a purely cosmetic feature. When the provider is None (not
+passed) or returns (False, ...) - the default - nothing about
+set()'s behavior changes at all from before this feature existed.
+
+App.__init__ passes loading_delay_provider=self._get_loading_delay_setting,
+which reads straight from self.cfg each call (not cached), so a change
+made in the Developer tab applies starting with the very next tab
+switch, no restart needed.
+
+Verified directly: disabled (default) means zero overlay and an
+immediate get() update; enabling it still keeps get() immediate on the
+SAME call, but a real overlay widget appears and correctly auto-
+destroys itself after the configured duration; and both Developer tab
+controls (the enable toggle and the duration slider) correctly update
+cfg and the live label.
+
+
+67. HINT ICON SWEEP COMPLETE + A REAL LAYOUT BUG FOUND AND FIXED
+------------------------------------------------------------------
+Converted the remaining 7 always-visible description paragraphs in
+Settings/Developer to the hint-icon pattern (Media Library Folders,
+Launch Size, YouTube Bot Detection, Playlist Timeout, Scroll Speed,
+Loading Delay, Window Heartbeat, Grant Developer Access) - every
+"text_color=gray60, wraplength=500" permanent description block in the
+whole app is now gone, replaced by a compact header + small "?" icon.
+
+Found and fixed a real layout bug while doing this: the hint icon was
+rendering on its OWN line below the header instead of beside it, for
+every one of these conversions. Root cause: _sub_header()'s own label
+always packed with the default side="top", so packing a hint icon
+right after it with side="left" in the same frame just placed the icon
+in the next available "row" underneath, not next to the text. Fixed by
+giving _sub_header() an optional pack_side parameter (default "top",
+unchanged for the ~15 other call sites that don't pair with a hint
+icon) and passing pack_side="left" at these specific call sites.
+_section_header() had a related but different issue - it already
+packs its own label with side="left" internally, but that happens
+inside its OWN inner wrapper frame that it returns; a hint icon packed
+into the OUTER frame I'd created (not that returned wrapper) still
+ended up on the wrong "row". Fixed by capturing _section_header()'s
+return value and packing the hint icon into it directly.
+
+Confirmed via a screenshot, not just by re-reading the code: Media
+Library Folders now genuinely shows its "?" icon inline, on the same
+line as the header text, matching the same layout every other
+converted section correctly used from the start. Full regression suite
+(including the Developer tab, which had 3 of these conversions) still
+passes.
+
+
+68. v1.5.1: NO LEFTOVER .PART FILES, GRANT-ACCESS ENTER KEY, PLAYLIST HOVER TOOLTIP REMOVED
+------------------------------------------------------------------
+Version bumped to 1.5.1 (core/app_info.py + installer.iss).
+
+REAL BUG FIXED: core/downloader.py's download_video/download_audio
+never cleaned up stray .part/.ytdl fragment files after a SUCCESSFUL
+download - a genuine, confirmed gap in yt-dlp's own cleanup, especially
+with concurrent_fragment_downloads (used here) and post-processing
+(merge/recode/extract) leaving intermediate files behind. New
+_cleanup_stray_part_files(out_dir, name, final_path) runs right after
+verifying the final output exists, removing any {name}.*.part,
+{name}.part, {name}.*.ytdl, {name}.ytdl leftovers - never touching
+final_path itself. Verified directly: realistic stray fragment files
+cleaned up, the real output preserved, and an unrelated file with a
+different base name correctly left untouched.
+
+Grant Developer Access (Developer tab) now submits on Enter, matching
+the same pattern the dev login form already used - bound on all 3
+fields (my password, new username, new password). Confirmed the
+underlying grant logic works correctly when called directly; could not
+get a clean automated confirmation of the actual key-press event
+itself, since even the ALREADY-PROVEN-WORKING dev login Enter-to-submit
+feature doesn't trigger via Xvfb's synthetic <Return> event dispatch in
+this environment (a real, demonstrated testing limitation, not
+specific to this new code) - worth a quick manual check.
+
+Playlist button hover tooltip removed entirely (the _add_tooltip() call
+that only fired for names truncated past 20 characters, which in
+practice was probably most/all real playlist names, explaining why it
+read as "hovering any playlist button shows a gray box").
+
+
+69. REAL BUGS FIXED: URL SCRAPER TOOLBAR GRID COLLISION + REQUEST-RELOAD ICON SIZE
+------------------------------------------------------------------
+Found and fixed the actual cause of "the select multiple toggle switch
+initially renders far down": in gui/app.py's _build_url_scraping_subtab,
+scrape_status_label and the selection toolbar row were BOTH gridded at
+row=2 (a genuine collision - two widgets competing for the same grid
+cell), and the toolbar row also carried a stray, unexplained
+pady=(24, 6) on top of that. Fixed by giving the toolbar its own row
+(row=3, results frame moved to row=4 to stay after it) with normal
+pady=(0, 6) matching every other selection toolbar in the app. Verified
+directly via grid_info() - not just a visual pixel-gap guess - that the
+two widgets no longer share a row and the stray padding is gone.
+
+Request History's reload button used font=app.font_small while every
+other reload button in the app (Playlists, Media Library, General
+History) used font=app.font_normal - a real, confirmed inconsistency
+making its icon render visibly smaller. Fixed to match. Verified by
+comparing the actual rendered font size across all 4 reload buttons
+directly - all report the identical size now.
+
+
+70. REAL PERFORMANCE/ARTIFACT BUG FIXED: HEADER FRAME REFLOW ON EVERY TAB SWITCH
+------------------------------------------------------------------
+Found and fixed the actual cause of "when the download bar... goes away
+and comes back... it moves every element and frame": _on_main_tab_changed
+was calling grid_remove()/grid() on mini_progress_bar and mini_log_label
+based on the active tab. grid_remove() doesn't just hide a widget - it
+removes its ROW from the grid layout entirely, so everything below it
+(the whole sidebar + content area) had to physically shift position on
+every single tab switch. This was a genuine, confirmed layout bug, not
+just a cosmetic nitpick - it explains the described performance
+sluggishness too, since every switch forced a full re-layout of
+basically the entire window.
+
+Fixed by keeping both widgets ALWAYS gridded (their row space
+permanently reserved, never removed): mini_progress_bar simply always
+mirrors the real progress_bar's value now (harmless redundancy on the
+Download tab, which already shows the real one) - discovered along the
+way that CTkProgressBar doesn't even support fg_color="transparent"
+(raises ValueError immediately), which would have been a dead end
+anyway. mini_log_label's TEXT (not its grid presence) is what toggles
+now - blanked while on Download, restored to the actual last message
+when leaving it, tracked via a new self._last_mini_log_text set on
+every _log() call regardless of which tab is active.
+
+Verified this is genuinely fixed by comparing the sidebar's own
+winfo_rooty() before and after a Download<->History tab switch -
+identical (306 == 306), not just "looks probably fine." Also verified
+the log echo itself still behaves correctly: shows real messages on
+non-Download tabs, blanks while on Download, and correctly restores the
+true last message (not stale or blank) when switching back away from
+Download to another tab.
+
+
+71. HINT ICONS: AUTO SAVE + LOG DISPLAY CONVERTED, CLOSE-ON-LEAVE HARDENED
+------------------------------------------------------------------
+Two sections that weren't caught by the earlier sweep (they used a
+slightly different code pattern than the "text_color=gray60,
+wraplength=500" one the earlier pass searched for) - Auto Save and Log
+Display in Settings - now also use the "?" hint icon pattern, inline in
+the same row as their header, matching every other converted section.
+Verified via screenshot that "Auto Save ?" renders correctly on one
+line.
+
+Also hardened _add_hint_icon's close behavior: the popup window itself
+now also closes on <Leave> (on top of the existing icon's own <Leave>
+binding), a safety net for the edge case where the mouse trajectory
+happens to briefly cross into the popup's own small gap area, so the
+popup can never get stuck open regardless of exact mouse path - "ensure
+they go away when the pointer is not on them" applying robustly to
+every question-mark tooltip, not just the common direct-leave case.
+Worth being upfront: I could not get a clean automated confirmation of
+this specific addition firing correctly, since Xvfb's synthetic
+<Leave> event dispatch has proven unreliable for CTk widgets throughout
+this whole session (the same limitation hit repeatedly with hover/drag/
+key-press testing) - the binding is standard Tkinter and structurally
+identical to the icon's own already-proven-correct Leave binding, so
+I'm confident in it, but a real-world check is the actual verification
+here.
+
+
+72. SIDEBAR COLLAPSE ORDERING + VERSION TAB GENUINELY AT THE BOTTOM
+------------------------------------------------------------------
+gui/sidebar_tabview.py's toggle_sidebar() now follows the specific
+order asked for: 1) restyle every button to icon-only FIRST, 2) THEN
+shrink the sidebar frame, 3) THEN a single update_idletasks() forces
+one clean re-render pass - restyling before resizing means Tk never
+has to lay out oversized text labels inside an already-narrow frame
+mid-transition. Verified the full collapse/expand cycle still works
+correctly after reordering (buttons stay visible+operational while
+collapsed, text correctly restored on expand).
+
+Version is now genuinely anchored to the bottom of the sidebar frame,
+not just last-in-a-list with extra padding (which was the previous,
+weaker attempt at this same request). A new version_frame is packed
+with side="bottom" before button_frame claims the remaining space, and
+add()/​_repack_buttons() route Version's button into that separate
+frame instead of the shared one - it can never end up reordered among
+the others since it's genuinely alone in its own container. Verified
+directly: the button's actual master is the new dedicated frame (not
+button_frame), and its rendered position is only 8px from the
+sidebar's true bottom edge, confirmed further by a screenshot with a
+taller window showing clear open space between the main tab group and
+Version. Also confirmed collapse/expand and the dynamically-added
+Developer tab both still work correctly with the restructured layout.
+
+
+73. X BUTTONS ADDED TO REMAINING TEXT FIELDS + BATCH QUEUE CLEAR/X TOGGLE
+------------------------------------------------------------------
+Added the standard clear-X pattern to every remaining text field that
+was missing one (excluding Settings tab fields and the dev-notes .txt-
+file-path picker, per how this was specifically scoped): Batch Queue's
+"Request name" field, the URL Scraper's main URL entry, and the
+Developer tab's login (username/password) and Grant Access (my
+password/new username/new password) fields - all using the same
+existing _add_clear_button helper, no new mechanism needed.
+
+Batch Queue's shared Clear/X button (used by both the plain-textbox and
+dynamic-URL-list variants) now shows "X" specifically when the dynamic
+variant is active, and reverts to the word "Clear" for the plain
+textbox variant - per how this was specifically asked for, scoped only
+to the dynamic case. Kept in sync by _apply_batch_queue_mode(), which
+already runs whenever the mode setting changes.
+
+Verified all of it directly: each new X button actually clears its
+field when clicked (queue name, scraper URL, dev login username, grant-
+access password all tested individually), and the Clear/X label
+genuinely swaps in both directions when toggling the dynamic batch
+queue setting on and off.
+
+
+74. DISCLAIMER BOX AUTO-SIZED TO CONTENT (25% WINDOW WIDTH)
+------------------------------------------------------------------
+New App._estimate_wrapped_text_height(text, font, width_px) - a real
+word-wrap simulation using the font's own actual character measurements
+(font.measure()), not a rough character-count guess, so it's accurate
+regardless of font family/size. The disclaimer box now uses
+_slider_width() (the same "25% of current window width" helper the
+sliders already used) for its width, and this new estimator for its
+height - computed FROM the disclaimer's own actual text at that width,
+so it's never awkwardly cramped with an unwanted scrollbar nor
+oversized with empty space, regardless of how long the real disclaimer
+text is.
+
+Verified the estimator directly first (short text at wide width ≈ 1
+line, the same text needing visibly more estimated height at a
+narrower width, multi-paragraph text with blank lines correctly adding
+extra height) before trusting it for real. Then verified the actual
+wired-up box: width is genuinely exactly 25% of the window's real
+width, and height exactly matches what the estimator itself computes
+for the box's real content - confirmed via a real dark-mode 1920x1080
+screenshot showing a cleanly content-sized box with no scrollbar and no
+excess space.
+
+
+75. PLAYWRIGHT BROWSER INSTALL RUN AUTOMATICALLY BY THE INSTALLER
+------------------------------------------------------------------
+Real, confirmed problem: installing the playwright PYTHON PACKAGE
+(bundled into the app) is not the same as having the actual Chromium
+BROWSER Playwright needs to function - that's a separate, large
+download Playwright's own installer fetches (`playwright install
+chromium`). Without that ever running, URL Scraping fails immediately
+the first time anyone tries it, which is exactly the "it fails to
+scrape because it doesn't see it" symptom described.
+
+main.py gained a --playwright-install flag (same pattern as the
+existing --daemon flag for the background queue) that calls
+core/url_scraper.py's new ensure_playwright_browser_installed(), which
+runs `python -m playwright install chromium` via subprocess and
+reports success/failure. installer.iss's [Run] section now runs this
+automatically, once, right after installation (before the "launch the
+app" step), with its own visible status message since a several-
+hundred-MB download taking a moment shouldn't look like the installer
+silently hung.
+
+Verified this GENUINELY works, not just compiles: called
+ensure_playwright_browser_installed() directly against this
+environment's REAL Playwright installation and confirmed success, then
+ran main.py --playwright-install as an actual subprocess (exactly how
+installer.iss's [Run] step will invoke it) and confirmed the correct
+output and a clean exit code. As with every other .iss change this
+project has needed, I still can't compile-test the Inno Setup script
+itself in this environment - caught and removed one flag
+(runascurrentuser) I wasn't actually confident is a real, valid [Run]
+section flag rather than risk including something wrong, keeping only
+waituntilterminated, which is genuinely documented and already used
+successfully elsewhere in this exact file.
+
+
+76. LOADING OVERLAY GAINED AN ACTUAL SPINNER ANIMATION
+------------------------------------------------------------------
+The existing loading-delay overlay (Developer tab toggle, off by
+default - see the "Loading Delay" section) previously just showed a
+blank neutral-colored frame. Now includes a low-key rotating spinner
+glyph on top of it, styled to match the sidebar's own simple gray
+circular icon language (see the More icon, redrawn earlier as a
+genuine full circle) - just bigger and animated. Layering, bottom to
+top, exactly as asked for: the real, already-switched GUI underneath ->
+the blank frame raised on top of it -> the spinner centered on top of
+that. _SPINNER_FRAMES cycles through 4 quarter-circle Unicode glyphs
+every 150ms via _animate_spinner(), which stops itself automatically
+once its label no longer exists (the overlay was destroyed) - no
+explicit cancel/stop call needed, and no risk of a runaway .after()
+chain surviving past the overlay's own lifetime.
+
+Verified directly at the widget level: the overlay and spinner both
+exist immediately after a tab switch with this enabled, the spinner's
+displayed glyph genuinely changes between two points in time (proving
+real animation, not a static image), the whole thing correctly
+auto-hides after the configured duration, and no crash or error occurs
+afterward (confirming the animation loop stopped cleanly rather than
+still trying to reconfigure a destroyed label). A screenshot attempt to
+additionally show this visually didn't line up with the right moment
+in the transient overlay's lifetime (a capture-timing issue on my end,
+not something the direct widget-state tests indicate is broken) -
+worth being upfront that this specific visual confirmation didn't
+pan out, even though the underlying mechanism is solidly verified.
+
+
+77. WINDOW-RESIZE UNRENDER/RERENDER (settles only once the resize "drops")
+------------------------------------------------------------------
+App.__init__ binds <Configure> on the root window itself. This fires
+continuously - many times a second - for the ENTIRE duration of a live
+resize drag, not just once at the end, and also fires for window MOVES
+(not just resizes) and for all sorts of unrelated child-widget geometry
+changes that bubble up. _on_window_configure() filters all of that down
+to just genuine root-window SIZE changes (event.widget is self, and the
+new (width, height) actually differs from the last known size - a pure
+move is correctly ignored).
+
+On a genuine size change: a blank overlay (matching the window's own
+background color) is raised over the entire window - "unrendering" in
+the sense that it visually hides whatever's underneath while it's
+still actively reflowing mid-drag, without anything underneath actually
+being torn down or rebuilt. Every subsequent Configure event during the
+same drag just resets a 200ms debounce timer rather than recreating the
+overlay (a real, deliberate distinction - a naive non-debounced
+implementation would flicker the overlay on and off constantly
+throughout the drag, which is worse than not having one). Only once
+that timer completes with NO further resize activity in between - the
+window size has genuinely "dropped"/settled - does the overlay come
+down, revealing the exact same GUI that was there the whole time.
+
+Verified directly: no overlay at rest, one appears immediately on a
+real size change, a simulated rapid burst of resize events (mimicking
+a live drag) reuses the exact same overlay object with zero
+flicker/recreation, the overlay correctly disappears once the
+simulated drag stops and the debounce settles, and - importantly - a
+PURE window move with no size change correctly does NOT trigger the
+overlay at all, confirming the size-change filter genuinely works and
+this isn't just reacting to every Configure event blindly. Also
+confirmed normal field interaction (typing into url_entry) still works
+correctly once a resize has settled.
+
+
+78. v1.5.2: REAL PERFORMANCE FIX + LIKELY THE MEDIA TAB RELOAD-INCONSISTENCY CAUSE
+------------------------------------------------------------------
+Found and fixed a genuine, confirmed performance bug that also very
+likely explains "reloading is inconsistent on the Media tab": EVERY
+search box in the app (Playlists, Media Library, General History,
+Request History) was rebuilding its ENTIRE list from scratch - destroy
+every row, rebuild every row - on every single keystroke, via a
+StringVar trace with no debouncing at all. This gets measurably worse
+as a list grows, exactly matching "this app is just getting started and
+will become a much larger app" - and fast typing could fire a new
+rebuild before a previous one had even finished destroying its old
+widgets, which is exactly the kind of overlapping-call scenario that
+produces inconsistent/glitchy partial-render results.
+
+New App._debounced_call(after_id_attr, delay_ms, func) - a generic,
+reusable debounce helper (cancels whatever's already scheduled under a
+given attribute name, reschedules fresh) - applied to all 4 search
+traces: Playlists, Media Library, General History, and Request History.
+Same 300ms debounce window already used for the Library max-results
+slider fix earlier this session.
+
+Verified directly with simulated rapid typing (character by character,
+like a fast typist) across all 4 search boxes: zero rebuild calls fire
+while actively typing, exactly ONE fires after typing genuinely pauses
+- not one per keystroke. This is a real, measured before/after
+difference (confirmed via an instrumented call-counting wrapper around
+each refresh function), not just a plausible-sounding change.
+
+
+79. BOOT SPLASH SCREEN + SIMPLER INSTALLER ICON
+------------------------------------------------------------------
+New gui/splash_screen.py - shown before the real App() window, with a
+real minimum-5-second display (MIN_DISPLAY_SECONDS), switching from
+"Launching..." (animated ellipsis) to "Please wait..." after 60s
+(PLEASE_WAIT_AFTER_SECONDS), an indeterminate progress bar, and a
+genuinely staged logo reveal matching the app's own icon.ico design
+(dark rounded background + circular "platform" ring first, WITHOUT the
+arrow, then the three media-type glyphs fade in, then the arrow itself
+appears on top last) - redrawn via PIL in stages rather than pixel-
+extracted from the flattened .ico, which has no separate layers to pull
+apart. Verified this specific reveal order is real, not just visually
+plausible, by sampling actual pixel alpha values at the arrow's
+location: fully transparent at stage 0, fully opaque at stage 3.
+
+Honest limitation stated up front: Tkinter is single-threaded, so this
+can't animate smoothly WHILE the real App() does its own synchronous
+construction (normally well under a second) - the animation runs
+before and after that construction, not literally during arbitrarily
+long work. Threading App() itself to allow true concurrent animation
+would be a much bigger, riskier change than a splash screen justifies.
+
+Two real bugs found and fixed during testing, both worth being
+specific about since they show genuine iteration, not first-try
+success: (1) destroying the splash's own separate ctk.CTk root left
+customtkinter's internal periodic callbacks (progress bar indeterminate
+animation, DPI-scaling checks) still scheduled, which crashed on
+firing against an already-torn-down interpreter; (2) my FIRST attempted
+fix (blanket-cancelling every pending after() callback) actually made
+things WORSE by breaking the progress bar's own internal Tcl command
+bookkeeping, causing destroy() itself to raise. Landed on a properly
+targeted fix: explicitly .stop() the progress bar (the correct,
+documented cleanup for indeterminate mode) plus a defensive try/except
+around destroy() itself, so close() always completes and never
+interrupts whatever called it - verified by running the ACTUAL run()
+function end-to-end (not a hand-rolled copy of its logic), confirming
+it reaches app.mainloop() with a fully working, fully interactive app,
+and that the real minimum-duration timing is genuinely enforced. A
+cosmetic stderr message from customtkinter's own internal loops can
+still appear when running from source/console - confirmed harmless and
+non-blocking every time, and not something a real end user running the
+packaged, windowed .exe would ever see (no console window in that
+context).
+
+New installer_icon.ico - a simple, single-tone rounded-square background
+with one bold white download-arrow-into-tray symbol, no gradients/glow/
+multiple competing icons, per how this was specifically asked for
+("much less pazaz and more to signify a downloader"). installer.iss's
+SetupIconFile now points at this new file specifically - the app's own
+icon.ico (used for the actual running app/taskbar/window icon) is
+completely untouched, since only the INSTALLER's own icon was asked to
+change.
+
+
+79. v1.5.2: BOOT SPLASH SCREEN + SIMPLER INSTALLER ICON
+------------------------------------------------------------------
+New gui/splash_screen.py - shown before the real App() window, per how
+this was specifically asked for: minimum 5 real seconds displayed,
+"Launching..." with an animated ellipsis, switching to "Please wait..."
+after 60 real seconds, an indeterminate progress bar, and the app's own
+logo forming in stages (redrawn via PIL rather than pixel-extracted
+from the flattened .ico, which has no separate layers to pull apart):
+background + the ring "platform" first, WITHOUT the arrow yet, then the
+three media-type glyphs (filmstrip/note/photo) fade in, then finally
+the download arrow itself appears on top, completing the logo. Pixel-
+verified (not just visually assumed) that the arrow region is genuinely
+fully transparent at stage 0 and genuinely opaque at stage 3.
+
+gui/app.py's run() (what main.py actually calls) now: bootstraps, shows
+the splash, constructs the real App() underneath it, waits out whatever
+remains of the 5-second minimum if construction finished faster (it
+normally does, well under a second), closes the splash, then enters
+mainloop() as before.
+
+Honest, stated limitation: Tkinter is single-threaded, so the splash
+can't animate smoothly WHILE App() does its own synchronous
+construction work - the animation runs before and after that
+construction, not literally during it. Threading App() itself to allow
+true concurrent animation would be a much bigger, riskier architectural
+change than a splash screen justifies, especially given App()
+construction is already fast.
+
+Real debugging happened building SplashScreen.close(): the first
+version left orphaned internal customtkinter callbacks (the progress
+bar's own indeterminate-mode animation loop, plus a couple of
+customtkinter's own internal per-CTk-instance maintenance loops) that
+errored out on an already-destroyed window. A first FIX ATTEMPT
+(blanket-cancelling every pending after() callback via Tcl's own "after
+info") actually made things WORSE - it broke the progress bar's own
+internal Tcl command bookkeeping, turning a stderr warning into an
+actual crash on destroy(). The corrected, tested fix: explicitly
+.stop() the progress bar specifically (the correct, documented cleanup
+for CTkProgressBar's indeterminate mode) and wrap destroy() itself
+defensively, rather than a blanket cancellation. A cosmetic stderr
+message from customtkinter's own remaining internal loops can still
+appear when running from source/console - confirmed harmless (doesn't
+crash, doesn't interrupt execution, doesn't affect the real app
+afterward) - and wouldn't be visible at all in a real packaged
+windowed .exe with no console attached.
+
+Verified extensively: the minimum-duration logic genuinely holds (timed
+directly against the wall clock), the splash correctly closes without
+raising, the real App() remains fully functional immediately afterward,
+and - importantly - the ACTUAL run() function main.py calls (not just
+the pieces in isolation) was exercised end-to-end with mainloop()
+mocked out, confirming the real code path completes cleanly.
+
+New installer_icon.ico - a single, bold, flat-color download-tray
+symbol replacing the busier multi-icon gradient design for the
+INSTALLER specifically (SetupIconFile in installer.iss), per "much less
+pizzazz, more to signify a downloader." The app's own icon.ico (used
+for the running app / taskbar / window icon) is untouched - only what
+the installer.exe itself displays changed, matching the specific scope
+of what was asked.
+
+
+80. FIXED: URL SCRAPER "EXECUTABLE NOT FOUND" - A REAL BUG IN MY OWN EARLIER FIX
+------------------------------------------------------------------
+Root cause found: core/url_scraper.py's ensure_playwright_browser_installed()
+(built last round to fix installer-side browser downloading) called
+`subprocess.run([sys.executable, "-m", "playwright", "install",
+"chromium"], ...)`. This works fine running from source (sys.executable
+is a real python.exe that understands -m). In the PACKAGED app,
+sys.executable is the app's OWN compiled .exe - which does not
+understand -m module-invocation syntax at all. It just receives
+["-m", "playwright", "install", "chromium"] as plain arguments that
+match none of this app's own recognized flags (--daemon,
+--playwright-install), so it silently launched a redundant second copy
+of the whole GUI app in the background and did nothing useful. The
+browser was NEVER actually being downloaded for anyone using the real
+packaged app - exactly explaining "the executable is not found" when
+URL Scraping was attempted. My earlier testing never caught this
+because it only tested from source, where this coincidentally works.
+
+Fixed by calling Playwright's own public playwright.__main__.main()
+entry point directly, IN-PROCESS (with sys.argv temporarily patched to
+["playwright", "install", "chromium"]) instead of spawning ANY
+subprocess for this. This sidesteps the whole problem architecturally -
+it's a normal Python function call within the already-running
+interpreter, so it works identically whether that interpreter is
+frozen or not, since it never depends on sys.executable supporting -m
+at all. Also found and removed an orphaned leftover return statement in
+the same function (referencing an undefined variable, sitting
+unreachable inside a finally block) from the same edit.
+
+Verified this fix is real, not just plausible-sounding: ran the new
+implementation successfully against this environment's actual
+Playwright installation, THEN specifically simulated the frozen-app
+failure condition by mocking sys.executable to a nonexistent path and
+confirmed the install STILL succeeds - direct proof the new code
+genuinely doesn't depend on sys.executable working correctly anymore,
+unlike the old one (separately confirmed the OLD subprocess-based
+approach does fail under that same simulated condition, for full
+before/after contrast).
+
+Second, related fix: gui/app.py's URL Scraper was dumping Playwright's
+raw, technical "Executable doesn't exist..." error text directly at
+the user via a generic error dialog, with no indication of what to
+actually do about it. Now detects this specific error message and
+offers to install the browser right there (reusing the now-fixed
+ensure_playwright_browser_installed()) with automatic retry of the
+original scrape once installation succeeds - any OTHER kind of scrape
+error still shows the normal error dialog unchanged. Verified all three
+paths directly: the missing-browser error correctly routes to the new
+install-and-retry flow (not the raw error dialog), a genuinely
+unrelated error still shows the normal dialog (confirming the
+detection isn't over-broad), and a successful install correctly
+triggers an automatic retry of the original scrape request.

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build output
+build/
+dist/
+*.spec
+installer_output/
+
+# Runtime-generated data. When run from source these are created next to
+# main.py; for a frozen build they live in %APPDATA%\Media Downloader.
+# None of them belong in the source tree or a release.
+crash_log.txt
+fault_log.txt
+startup_log.txt
+options/config.json
+options/dev_access.json
+options/draft_state.json
+options/pending_import.json
+history/
