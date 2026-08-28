@@ -1,8 +1,8 @@
 # Media Downloader
 
 A customtkinter GUI for `yt-dlp`, built for someone who downloads media
-constantly - single-window, tabbed, with playlists, history, dependency
-auto-install, and VLC integration.
+constantly - single-window, tabbed, with playlists, history, and dependency
+auto-install.
 
 ## Setup (running from source)
 
@@ -15,10 +15,10 @@ auto-install, and VLC integration.
    ```
    python main.py
    ```
-FFmpeg and VLC do NOT need to be pre-installed - the app detects them on
-first launch and lets you install both with one click from the **Version**
+FFmpeg does NOT need to be pre-installed - the app detects it on
+first launch and lets you install it with one click from the **Version**
 tab (no admin rights needed; FFmpeg is dropped straight into the app's own
-folder, VLC uses its official silent installer).
+folder).
 
 On first launch you'll be asked to pick a default download folder - the
 app creates `Videos/` and `Music/` subfolders inside it automatically.
@@ -43,9 +43,9 @@ VideoDownloaderApp/
 │   ├── config.py                   # settings storage
 │   ├── history.py                  # download history storage
 │   ├── playlists.py                 # playlist storage
-│   ├── dependencies.py              # check/install ffmpeg, vlc, pip pkgs
+│   ├── dependencies.py              # check/install ffmpeg and pip pkgs
 │   ├── downloader.py                 # yt-dlp wrapper
-│   └── utils.py                       # file moves, VLC launch, sanitizing
+│   └── utils.py                       # file moves, folder/file opening, sanitizing
 ├── gui/
 │   ├── app.py                         # the whole window (5 tabs)
 │   ├── scrollable_dropdown.py          # custom scrollable dropdown widget
@@ -53,7 +53,6 @@ VideoDownloaderApp/
 └── updates/                              # one script per dependency
     ├── update_ytdlp.py
     ├── update_ffmpeg.py
-    ├── update_vlc.py
     ├── update_customtkinter.py
     ├── update_pillow.py
     └── update_all.py
@@ -63,19 +62,19 @@ VideoDownloaderApp/
 
 - **Download** - single download or a batch queue (paste many URLs, each
   auto-named from its title). Aspect ratio, quality, format, playlist and
-  subtitle options, thumbnail preview, "Open in VLC" shortcut, per-field
-  clear buttons, and a Clear Log button.
+  subtitle options, thumbnail preview, per-field clear buttons, and a Clear
+  Log button.
 - **Playlists** - Spotify-style: create a named playlist, add any finished
-  download to it, browse/remove tracks, open a track in VLC.
+  download to it, browse/remove tracks, and open a track with your OS's default app.
 - **History** - every download attempt (success, failed, or cancelled)
-  with the reason it failed if it did, plus one-click "open folder" / VLC.
+  with the reason it failed if it did, plus one-click folder/file opening.
 - **Settings** - change your default download folder (with a prompt to
   move existing files, Select All included), video/audio defaults,
   clipboard auto-detect, theme, color, font family/size, and a bold-text
   accessibility toggle.
 - **Version** - live status of every dependency (yt-dlp, customtkinter,
-  Pillow, FFmpeg, VLC) with per-item Install/Update buttons and one
-  "Update All" button.
+  Pillow, FFmpeg) with per-item Install/Update buttons and one "Update All"
+  button.
 
 ## Turning this into a real Windows app
 
@@ -97,9 +96,6 @@ VideoDownloaderApp/
 - Aspect-ratio filtering picks the closest matching format yt-dlp reports
   for that video rather than a guaranteed exact crop - most sources don't
   offer every ratio for every video.
-- Silent VLC installs can be blocked by some locked-down/managed Windows
-  machines; if that happens the installer window opens for you to click
-  through manually instead of failing silently.
 - Playlists here are lightweight (named lists of file paths you build up
   yourself) rather than a full drag-and-drop reorder UI.
 - DRM-protected sources (Spotify, Disney+, Hulu, Peacock, etc.) are not
@@ -129,6 +125,10 @@ Bug fixes:
 - URL Scraping shows its "No results yet" placeholder from first render.
 
 Appearance / behavior:
+- Removed the VLC integration - the app no longer bundles/installs VLC or has
+  "Open in VLC" buttons. Files now open with your OS's default app for that
+  file type (video, audio, or anything else), directly from History, Playlists
+  and the Library.
 - Launches maximized by default; any non-maximized launch is centered on
   screen.
 - The startup logo animation now loops (grow → hold → shrink → hold → repeat).

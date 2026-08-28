@@ -32,7 +32,7 @@ from core.error_popup import show_error
 from core.download_requests import (start_request, update_item, finish_request, add_item_to_request,
                                      reopen_for_retry, get_all_requests, get_request, delete_request,
                                      find_previous_download)
-from core.utils import (open_folder, open_file, open_in_vlc, open_media_smart, make_unique_name, sanitize_filename,
+from core.utils import (open_folder, open_file, make_unique_name, sanitize_filename,
                          beautify_title, weighted_match_score, strip_leading_special,
                          list_files, move_files, format_file_size)
 from core.history import load_history, add_entry, update_entry, clear_history, delete_entry
@@ -73,7 +73,6 @@ HISTORY_SORT_MODES = ["Newest first", "Oldest first", "Alphabetical (A-Z)", "Alp
 HISTORY_TYPE_FILTERS = ["All", "Video", "Audio"]
 COLOR_THEME_LABELS = {v: v.replace("-", " ").title() for v in COLOR_THEMES}
 BUILTIN_COLOR_THEMES = {"blue", "green", "dark-blue", "gold"}
-VLC_BUTTON_COLORS = {"fg_color": "#ff8800", "hover_color": "#cc6d00"}
 
 
 def apply_color_theme(theme_value):
@@ -692,9 +691,9 @@ class App(ctk.CTk):
         ctk.CTkButton(out_row, text="Open folder", width=95, font=self.font_normal,
                       fg_color="gray40", hover_color="gray30",
                       command=self.open_current_output_folder).grid(row=0, column=3, padx=(0, 6))
-        ctk.CTkButton(out_row, text="Open in VLC", width=95, font=self.font_normal,
-                      **VLC_BUTTON_COLORS,
-                      command=self.open_output_in_vlc).grid(row=0, column=4)
+        ctk.CTkButton(out_row, text="Open file", width=95, font=self.font_normal,
+                      fg_color="gray40", hover_color="gray30",
+                      command=self.open_output_file).grid(row=0, column=4)
 
         playlist_out_row = ctk.CTkFrame(shared, fg_color="transparent")
         playlist_out_row.grid(row=4, column=0, columnspan=4, sticky="ew", padx=15, pady=(0, 12))
@@ -1242,19 +1241,16 @@ class App(ctk.CTk):
         if not open_folder(target):
             messagebox.showwarning("Not found", f"Could not open:\n{target}")
 
-    def open_output_in_vlc(self):
-        """Opens the most recently downloaded FILE in VLC if we have one,
-        rather than just the containing folder - previously this always
-        opened the folder, which from the user's perspective just looked
-        like "clicking this button opens VLC and does nothing else." Falls
-        back to the folder if nothing's been downloaded yet this session."""
+    def open_output_file(self):
+        """Opens the most recently downloaded file with the OS's default app
+        for its type; if nothing was downloaded this session, opens the
+        output folder instead."""
         if self.last_downloaded_path and os.path.isfile(self.last_downloaded_path):
-            ok, msg = open_in_vlc(self.last_downloaded_path)
-        else:
-            target = self.last_output_dir or self._resolve_output_dir()
-            ok, msg = open_in_vlc(target)
-        if not ok:
-            messagebox.showwarning("VLC", msg)
+            self._open_media_or_warn(self.last_downloaded_path)
+            return
+        target = self.last_output_dir or self._resolve_output_dir()
+        if not target or not open_folder(target):
+            messagebox.showwarning("Open", "Nothing to open yet - download something first.")
 
     # ------------------------------------------------------------------ #
     def fetch_info_clicked(self):
@@ -2223,8 +2219,8 @@ class App(ctk.CTk):
         """Every playlist gets a real folder on disk under
         <download_root>/Playlists/<name>, created on demand. This is what
         the output-folder dropdown on the Download tab points at when you
-        pick a playlist to download directly into, and what "Open folder"/
-        "Open in VLC" (whole playlist) act on."""
+        pick a playlist to download directly into, and what the playlist's
+        "Open folder" button acts on."""
         root = self.cfg.get("playlists_path", "")
         if not root:
             return None
@@ -2303,10 +2299,6 @@ class App(ctk.CTk):
             fg_color="gray40", hover_color="gray30", state="disabled",
             command=self._open_playlist_folder)
         self.playlist_open_folder_btn.grid(row=0, column=1, padx=(10, 0))
-        self.playlist_open_vlc_btn = ctk.CTkButton(
-            title_row, text="Open in VLC", width=100, font=self.font_normal, state="disabled",
-            **VLC_BUTTON_COLORS, command=self._open_playlist_in_vlc)
-        self.playlist_open_vlc_btn.grid(row=0, column=2, padx=(10, 0))
 
         ctk.CTkLabel(right, text="This playlist is just a folder on disk - drag files in or out with your "
                                   "regular file manager too, this list always reflects what's actually there.",
@@ -2364,7 +2356,6 @@ class App(ctk.CTk):
             self.selected_playlist = None
             self.playlist_title_label.configure(text="Select a playlist")
             self.playlist_open_folder_btn.configure(state="disabled")
-            self.playlist_open_vlc_btn.configure(state="disabled")
             for w in self.playlist_items_frame.winfo_children():
                 w.destroy()
         self._refresh_output_playlist_dropdown()
@@ -2494,7 +2485,6 @@ class App(ctk.CTk):
         self.selected_playlist = name
         self.playlist_title_label.configure(text=name)
         self.playlist_open_folder_btn.configure(state="normal")
-        self.playlist_open_vlc_btn.configure(state="normal")
         for w in self.playlist_items_frame.winfo_children():
             w.destroy()
         root = self.cfg.get("playlists_path", "")
@@ -2515,7 +2505,7 @@ class App(ctk.CTk):
             if size_label:
                 ctk.CTkLabel(row, text=size_label, font=self.font_small, text_color="gray60").pack(
                     side="left", padx=(0, 8))
-            ctk.CTkButton(row, text="Open", width=55, font=self.font_small, **VLC_BUTTON_COLORS,
+            ctk.CTkButton(row, text="Open", width=55, font=self.font_small,
                           command=lambda p=full_path: self._open_media_or_warn(p)).pack(side="left", padx=4)
             ctk.CTkButton(row, text="Location", width=70, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
@@ -2532,31 +2522,17 @@ class App(ctk.CTk):
         if not folder or not open_folder(folder):
             messagebox.showwarning("Not found", "That playlist's folder couldn't be opened.")
 
-    def _open_playlist_in_vlc(self):
-        if not self.selected_playlist:
-            return
-        folder = self._playlist_folder(self.selected_playlist)
-        ok, msg = open_in_vlc(folder)
-        if not ok:
-            messagebox.showwarning("VLC", msg)
-
     def _remove_from_playlist(self, filename):
         remove_file_from_playlist(self.cfg.get("playlists_path", ""), self.selected_playlist, filename)
         self._select_playlist(self.selected_playlist)
 
-    def _vlc_or_warn(self, path):
-        ok, msg = open_in_vlc(path)
-        if not ok:
-            messagebox.showwarning("VLC", msg)
-
     def _open_media_or_warn(self, path):
-        """File-type-aware open: video/audio go to VLC (if installed),
-        everything else opens with the OS's own default app for it -
-        consistent per file type rather than always assuming VLC. A
+        """Opens the file with the OS's own
+        default app for its type. A
         genuine permissions problem gets the same elevated-access
         redirect offer as _open_with_permission_redirect, rather than
         just a plain "couldn't open this" warning with no path forward."""
-        ok, msg = open_media_smart(path)
+        ok, msg = open_file(path)
         if ok:
             return
         if msg == "permission_denied":
@@ -2721,7 +2697,7 @@ class App(ctk.CTk):
                 subtitle = f"Duplicate group {item['duplicate_group']} - " + subtitle
             ctk.CTkLabel(row, text=subtitle, font=self.font_small, text_color="gray60", anchor="w").grid(
                 row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
-            ctk.CTkButton(row, text="Open", width=60, font=self.font_small, **VLC_BUTTON_COLORS,
+            ctk.CTkButton(row, text="Open", width=60, font=self.font_small,
                           command=lambda p=item["path"]: self._open_media_or_warn(p)).grid(
                 row=0, column=1, rowspan=2, padx=6)
             ctk.CTkButton(row, text="Location", width=75, font=self.font_small, fg_color="gray40",
@@ -3040,8 +3016,9 @@ class App(ctk.CTk):
             folder = os.path.dirname(path) or ""
             ctk.CTkButton(row, text="Open folder", width=100, font=self.font_small,
                           command=lambda f=folder: self._open_or_warn(f)).grid(row=0, column=col + 1, rowspan=2, padx=6)
-            ctk.CTkButton(row, text="VLC", width=55, font=self.font_small, **VLC_BUTTON_COLORS,
-                          command=lambda p=path: self._vlc_or_warn(p)).grid(
+            ctk.CTkButton(row, text="Open file", width=75, font=self.font_small,
+                          fg_color="gray40", hover_color="gray30",
+                          command=lambda p=path: self._open_media_or_warn(p)).grid(
                 row=0, column=col + 2, rowspan=2, padx=(0, 10))
 
     def _open_or_warn(self, folder):
@@ -3629,8 +3606,6 @@ class App(ctk.CTk):
             ok, msg = deps.install_python_package(item["pip_spec"])
         elif item["kind"] == "ffmpeg":
             ok, msg = deps.install_ffmpeg(progress_callback=lambda m: self._threadsafe_log(m))
-        elif item["kind"] == "vlc":
-            ok, msg = deps.install_vlc(progress_callback=lambda m: self._threadsafe_log(m))
         else:
             ok, msg = False, "Unknown dependency type."
         self._threadsafe_log(msg)
@@ -3654,8 +3629,6 @@ class App(ctk.CTk):
                 ok, msg = deps.install_python_package(item["pip_spec"])
             elif item["kind"] == "ffmpeg":
                 ok, msg = deps.install_ffmpeg(progress_callback=lambda m: self._threadsafe_log(m))
-            elif item["kind"] == "vlc":
-                ok, msg = deps.install_vlc(progress_callback=lambda m: self._threadsafe_log(m))
             else:
                 ok, msg = False, "Unknown dependency."
             summary.append(f"{item['name']}: {'OK' if ok else 'FAILED'} - {msg}")

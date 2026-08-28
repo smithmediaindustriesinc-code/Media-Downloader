@@ -11,8 +11,6 @@ def run():
             ok, msg = deps.install_python_package(item["pip_spec"])
         elif item["kind"] == "ffmpeg":
             ok, msg = deps.install_ffmpeg(progress_callback=print)
-        elif item["kind"] == "vlc":
-            ok, msg = deps.install_vlc(progress_callback=print)
         else:
             ok, msg = False, "Unknown dependency."
         summary.append((item["name"], ok, msg))
