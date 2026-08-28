@@ -106,6 +106,19 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.1
+
+- **Drag a video thumbnail straight onto the window.** Drag a thumbnail (or a
+  link) from your browser — e.g. a video on the YouTube home page — and drop it
+  anywhere on Media Downloader. It pulls the real video URL out of the drop,
+  puts it in the URL box, and then:
+  - on the **Single Download** tab, starts the download immediately;
+  - on the **Batch Queue** tab, adds the URL to the list (plain textbox or the
+    dynamic URL list, whichever mode is on) without starting;
+  - dropped on any other tab, fills the Single Download URL box and waits.
+  Needs the `tkinterdnd2` package; if it isn't installed the app runs exactly
+  as before, just without this feature.
+
 ### 1.6.0 (in development)
 
 - **Huge playlists no longer time out.** The playlist-info lookup now streams

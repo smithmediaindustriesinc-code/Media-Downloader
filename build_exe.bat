@@ -54,6 +54,8 @@ REM --collect-all playwright     : bundle the Playwright package + driver so URL
 REM                                Scraping works ^(the Chromium browser itself
 REM                                is still a separate post-install download -
 REM                                see installer.iss's --playwright-install step^).
+REM --collect-all tkinterdnd2    : bundle the tkdnd Tcl binaries used by the
+REM                                drag-a-thumbnail-onto-the-window feature.
 REM --exclude-module pygame*     : never needed by this app; keeps the build lean
 REM                                if pygame happens to be in the environment.
 echo Building - this takes a minute or two...
@@ -66,6 +68,7 @@ echo.
     --add-data "updates;updates" ^
     --collect-data customtkinter ^
     --collect-all playwright ^
+    --collect-all tkinterdnd2 ^
     --exclude-module pygame ^
     --exclude-module pygame_ce ^
     main.py

@@ -46,6 +46,26 @@ from gui.dialogs import MoveFilesDialog, NewPlaylistDialog
 from gui.request_history import build_request_history_section
 from gui.sidebar_tabview import SidebarTabview
 from core.dev_access import check_credentials as check_dev_credentials, grant_access as grant_dev_access
+from core.drag_drop import extract_video_url
+
+# --- optional: external drag-and-drop (drag a video thumbnail from a
+# browser onto the window -> its URL). Tkinter has no native external DnD;
+# tkinterdnd2 bundles the tkdnd Tcl binaries. The whole app MUST still run
+# if this package is absent (a source checkout or frozen build without it),
+# so the import is optional and every use is guarded by self._dnd_ok.
+try:
+    from tkinterdnd2 import TkinterDnD as _TkinterDnD
+    from tkinterdnd2 import DND_TEXT as _DND_TEXT, COPY as _DND_COPY
+    from tkinterdnd2.TkinterDnD import DnDWrapper as _DnDWrapper
+    # DnDWrapper is a mixin whose methods (drop_target_register, dnd_bind,
+    # ...) live on tkinter.BaseWidget - but the Tk ROOT is not a BaseWidget,
+    # so the CTk root only gets them by inheriting the mixin directly.
+    _APP_BASES = (ctk.CTk, _DnDWrapper)
+except Exception:  # pragma: no cover - exercised only where the dep is missing
+    _TkinterDnD = None
+    _DND_TEXT = "DND_Text"
+    _DND_COPY = "copy"
+    _APP_BASES = (ctk.CTk,)
 
 URL_PATTERN = re.compile(r"https?://\S+")
 # DEV_USERNAME / DEV_PASSWORD now live in core/dev_access.py, which also
@@ -93,12 +113,28 @@ def read_disclaimer():
         return "Disclaimer file not found."
 
 
-class App(ctk.CTk):
+class App(*_APP_BASES):
     def __init__(self):
         from core.startup_log import mark
         mark("App.__init__ start (before super().__init__())")
         super().__init__()
         mark("ctk.CTk.__init__ done")
+
+        # Load the tkdnd Tcl extension into THIS interpreter. Kept entirely
+        # optional: if tkinterdnd2 isn't installed (or tkdnd fails to load
+        # on this platform) the app runs exactly as before, just without
+        # thumbnail drag-and-drop. Every drop-target registration later is
+        # guarded by self._dnd_ok.
+        self._dnd_ok = False
+        if _TkinterDnD is not None:
+            try:
+                self.TkdndVersion = _TkinterDnD._require(self)
+                self._dnd_ok = True
+                mark(f"tkinterdnd2 loaded (tkdnd {self.TkdndVersion}); _dnd_ok = True")
+            except Exception as e:
+                mark(f"tkinterdnd2 present but tkdnd load failed (non-fatal): {e}; _dnd_ok = False")
+        else:
+            mark("tkinterdnd2 not installed (non-fatal); _dnd_ok = False")
 
         # Flipped once, in _on_close_requested(), before self.destroy()
         # is called. Every recurring background loop (_start_recurring's
@@ -223,6 +259,7 @@ class App(ctk.CTk):
         self._restore_draft_fields()
         self._recover_interrupted_downloads()
         self._ensure_download_root_in_library()  # A9: download folder is a library folder by default
+        self._wire_drag_and_drop()  # 1.6.1: drag a video thumbnail from a browser -> URL field
 
     RESOLUTION_PRESETS_BASE = [
         (3840, 2160), (2560, 1440), (1920, 1080), (1600, 900),
@@ -1017,6 +1054,127 @@ class App(ctk.CTk):
         self.batch_undo_btn.configure(state="normal" if self._batch_undo_stack else "disabled")
         self.batch_undo_count_label.configure(
             text=f"{len(self._batch_undo_stack)} removed" if self._batch_undo_stack else "")
+
+    # ------------------------------------------------------------------
+    # 1.6.1 - drag a video thumbnail from a browser onto the window
+    # ------------------------------------------------------------------
+    def _wire_drag_and_drop(self):
+        """Register the whole window - and every widget in it - as tkdnd
+        drop targets, so dropping a browser thumbnail/link anywhere on the
+        app routes its URL by the current mode. On Windows each Tk widget is
+        its own OLE drop window, so a drop only reaches a target that is
+        itself registered; registering the full tree is what makes "drop
+        anywhere" actually work. No-op unless self._dnd_ok."""
+        from core.startup_log import mark
+        if not getattr(self, "_dnd_ok", False):
+            mark("drag-and-drop wiring skipped (_dnd_ok is False)")
+            return
+        # DND_TEXT is the reliable one everywhere; the richer types are
+        # registered best-effort (some tkdnd builds reject unknown names).
+        types = [_DND_TEXT, "CF_UNICODETEXT", "text/uri-list", "text/plain",
+                 "text/html", "CF_TEXT"]
+
+        def register(widget):
+            got_one = False
+            for t in types:
+                try:
+                    widget.drop_target_register(t)
+                    got_one = True
+                except Exception:
+                    pass
+            if got_one:
+                try:
+                    widget.dnd_bind("<<Drop>>", self._on_thumbnail_drop)
+                    return 1
+                except Exception:
+                    return 0
+            return 0
+
+        wired = 0
+
+        def walk(widget):
+            nonlocal wired
+            wired += register(widget)
+            # CustomTkinter wraps a real tk Entry/Text inside a frame - the
+            # inner widget is what actually sits under the cursor on a drop.
+            for inner_attr in ("_entry", "_textbox", "_canvas"):
+                inner = getattr(widget, inner_attr, None)
+                if inner is not None and hasattr(inner, "drop_target_register"):
+                    wired += register(inner)
+            try:
+                children = widget.winfo_children()
+            except Exception:
+                children = []
+            for c in children:
+                walk(c)
+
+        try:
+            walk(self)
+        except Exception as e:
+            mark(f"drag-and-drop tree walk aborted (non-fatal): {e}")
+        mark(f"drag-and-drop wired on {wired} target(s)")
+
+    def _extract_video_url(self, raw):
+        """Thin instance wrapper around core.drag_drop.extract_video_url so
+        it can be monkeypatched/tested against the live app if ever needed."""
+        try:
+            return extract_video_url(raw)
+        except Exception as e:
+            self._log(f"Drag-and-drop: URL parse error ({e}).")
+            return None
+
+    def _on_thumbnail_drop(self, event):
+        """<<Drop>> handler. Fires on the Tk main thread (tkdnd posts it via
+        the normal event loop), so touching widgets here is safe."""
+        raw = getattr(event, "data", "") or ""
+        url = self._extract_video_url(raw)
+        if not url:
+            self._log("Drag-and-drop: couldn't find a video URL in what was dropped.")
+            return _DND_COPY
+
+        on_download_tab = (getattr(self, "tabview", None) is not None
+                           and self.tabview.get() == "Download")
+        on_batch_tab = (on_download_tab
+                        and getattr(self, "inner_tabview", None) is not None
+                        and self.inner_tabview.get() == "Batch Queue")
+
+        if on_batch_tab and self.cfg.get("dynamic_batch_queue_enabled", False):
+            self._batch_urls.append(url)
+            self._refresh_batch_dynamic_list()
+            self._log(f"Drag-and-drop: added to the dynamic batch queue - {url}")
+        elif on_batch_tab:
+            existing = self.batch_box.get("1.0", "end").rstrip()
+            self.batch_box.delete("1.0", "end")
+            self.batch_box.insert("1.0", (existing + "\n" + url + "\n") if existing else (url + "\n"))
+            self.batch_box.see("end")
+            self._log(f"Drag-and-drop: added to the batch list - {url}")
+        elif on_download_tab:
+            # Single Download sub-tab (or the Download tab generally):
+            # fill the URL and start the download straight away.
+            try:
+                self.inner_tabview.set("Single Download")
+            except Exception:
+                pass
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, url)
+            self._log(f"Drag-and-drop: starting download - {url}")
+            self.start_single_download()
+        else:
+            # Dropped while on some other top-level tab (Media/History/
+            # Settings/...). Switch to Single Download and pre-fill the URL,
+            # but don't auto-start - the drop was far from the download UI,
+            # so let the user press Download themselves.
+            try:
+                self.tabview.set("Download")
+                self.inner_tabview.set("Single Download")
+            except Exception:
+                pass
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, url)
+            self.url_entry.focus_set()
+            self._log(f"Drag-and-drop: URL ready on the Single Download tab - "
+                      f"press Download to start - {url}")
+        return _DND_COPY
 
     def _add_clear_button(self, parent, entry_widget, also_clear_thumbnail=False):
         def do_clear():
