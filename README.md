@@ -106,6 +106,17 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.0 (in development)
+
+- **Huge playlists no longer time out.** The playlist-info lookup now streams
+  entries in and only gives up if nothing arrives for a while, instead of a
+  fixed 60-second cap - a playlist with tens of thousands of entries can
+  finish. The Cancel button also aborts a slow lookup now.
+- The FFmpeg location is looked up once and cached (was re-scanned on every
+  metadata fetch and every download).
+- Settings files now carry a schema version with explicit, numbered
+  migrations for future changes.
+
 ### 1.5.4
 
 Bug fixes:
