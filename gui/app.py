@@ -1845,8 +1845,12 @@ class App(ctk.CTk):
         into that playlist's folder."""
         self._threadsafe_log("Full playlist mode - looking up playlist info...")
         timeout_s = self.cfg.get("playlist_fetch_timeout_s", 60)
+        # A threading.Event so the Cancel button can abort a slow playlist
+        # lookup too (during the lookup there's no Downloader yet to cancel).
+        self._playlist_lookup_cancel = threading.Event()
         try:
-            info = fetch_playlist_info(url, timeout_seconds=timeout_s)
+            info = fetch_playlist_info(url, timeout_seconds=timeout_s,
+                                       cancel_event=self._playlist_lookup_cancel)
         except PlaylistFetchTimeout as e:
             self._threadsafe_log(str(e), color="red")
             self.after(0, lambda: self._set_downloading_state(False))
@@ -2202,9 +2206,12 @@ class App(ctk.CTk):
             self._batch_items_remaining = 0
 
     def cancel_download(self):
+        lookup_cancel = getattr(self, "_playlist_lookup_cancel", None)
+        if lookup_cancel is not None:
+            lookup_cancel.set()  # abort a slow playlist-info lookup, if one is running
         if self.downloader:
             self.downloader.cancel()
-            self.cancel_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="disabled")
 
     def _threadsafe_log(self, message, level="simple", color=None):
         self.after(0, lambda: self._log(message, level=level, color=color))

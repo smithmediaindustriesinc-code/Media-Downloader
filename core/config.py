@@ -5,6 +5,7 @@ from core.paths import app_dir
 CONFIG_PATH = os.path.join(app_dir(), "options", "config.json")
 
 DEFAULT_CONFIG = {
+    "schema_version": 1,   # bumped whenever a migration is added to _MIGRATIONS below
     "download_root": "",   # chosen default folder; Videos/ and Music/ live under it
     "video_path": "",
     "music_path": "",
@@ -117,6 +118,42 @@ DEFAULT_CONFIG = {
 }
 
 
+# Current schema version - keep equal to DEFAULT_CONFIG["schema_version"].
+CONFIG_SCHEMA_VERSION = DEFAULT_CONFIG["schema_version"]
+
+# Numbered migrations. Each key N is a function that takes the config dict at
+# schema version N-1 and mutates/returns it at version N. Add one whenever a
+# setting is renamed, its shape changes, or an old value needs rewriting -
+# so upgrades are explicit and testable rather than guessed at.
+# Example (do not add unless real):
+#   def _migrate_to_2(cfg):
+#       cfg["new_name"] = cfg.pop("old_name", DEFAULT_CONFIG["new_name"])
+#       return cfg
+_MIGRATIONS = {
+    # 2: _migrate_to_2,
+}
+
+
+def _run_migrations(cfg):
+    """Steps cfg from its stored schema_version up to CONFIG_SCHEMA_VERSION,
+    applying each numbered migration in order. Unknown/absent schema_version
+    is treated as the current version for a config that already has all the
+    current keys, or as 1 otherwise - i.e. we never run migrations that
+    would corrupt a config that predates versioning but is otherwise fine."""
+    current = cfg.get("schema_version")
+    if not isinstance(current, int) or current < 1:
+        current = 1
+    for target in range(current + 1, CONFIG_SCHEMA_VERSION + 1):
+        migrate = _MIGRATIONS.get(target)
+        if migrate:
+            try:
+                cfg = migrate(cfg) or cfg
+            except Exception:
+                pass  # a failed migration must not brick startup
+    cfg["schema_version"] = CONFIG_SCHEMA_VERSION
+    return cfg
+
+
 def load_config():
     if os.path.exists(CONFIG_PATH):
         try:
@@ -124,7 +161,7 @@ def load_config():
                 data = json.load(f)
             cfg = DEFAULT_CONFIG.copy()
             cfg.update(data)
-            return cfg
+            return _run_migrations(cfg)
         except Exception:
             pass
     return DEFAULT_CONFIG.copy()
@@ -299,6 +336,7 @@ def merge_imported_config(imported):
         except Exception as e:
             report.append(f"Could not merge request history: {e}")
 
+    merged = _run_migrations(merged)
     return merged, report
 
 

@@ -31,6 +31,8 @@ FFPROBE_EXE = os.path.join(FFMPEG_DIR, "ffprobe.exe" if platform.system() == "Wi
 
 FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
+_ffmpeg_check_cache = None   # (ok, path) once resolved; cleared by invalidate_ffmpeg_cache()
+
 PIP_PACKAGES = {
     "customtkinter": "customtkinter>=5.2.0",
     "yt_dlp": "yt-dlp>=2025.1.1",
@@ -93,6 +95,15 @@ def check_ffmpeg():
     app's own executable (see install_dir() and installer.iss's
     vendor\\ffmpeg [Files] entry - avoids needing every user to download
     it separately on first run), then finally the system PATH."""
+    global _ffmpeg_check_cache
+    if _ffmpeg_check_cache is not None:
+        return _ffmpeg_check_cache
+    result = _resolve_ffmpeg()
+    _ffmpeg_check_cache = result
+    return result
+
+
+def _resolve_ffmpeg():
     if os.path.exists(FFMPEG_EXE):
         return True, FFMPEG_EXE
     from core.paths import install_dir
@@ -104,6 +115,13 @@ def check_ffmpeg():
     if found:
         return True, found
     return False, None
+
+
+def invalidate_ffmpeg_cache():
+    """Drop the cached check_ffmpeg() result - call after installing FFmpeg
+    or when the Version tab re-checks dependency status."""
+    global _ffmpeg_check_cache
+    _ffmpeg_check_cache = None
 
 
 def install_ffmpeg(progress_callback=None):
@@ -134,6 +152,7 @@ def install_ffmpeg(progress_callback=None):
     except Exception as e:
         return False, f"FFmpeg extraction failed: {e}"
 
+    invalidate_ffmpeg_cache()
     ok, path = check_ffmpeg()
     if ok:
         return True, f"FFmpeg installed to {FFMPEG_DIR}"
@@ -144,6 +163,7 @@ def install_ffmpeg(progress_callback=None):
 # Aggregate status for the Version tab
 # --------------------------------------------------------------------- #
 def check_all():
+    invalidate_ffmpeg_cache()
     results = []
 
     for key, spec in PIP_PACKAGES.items():
