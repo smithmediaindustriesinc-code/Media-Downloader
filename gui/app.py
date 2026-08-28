@@ -67,6 +67,16 @@ except Exception:  # pragma: no cover - exercised only where the dep is missing
     _DND_COPY = "copy"
     _APP_BASES = (ctk.CTk,)
 
+# Platform-independent tkdnd type names. On Windows tkdnd only recognizes real
+# clipboard-format names (CF_UNICODETEXT, CF_HTML, UniformResourceLocator, ...);
+# the X11 names "text/uri-list" / "text/html" pass through as dead strings that
+# never match, so a dragged *image* (which Chrome/Edge offer as CF_HTML +
+# UniformResourceLocator, often with no CF_UNICODETEXT) would be refused before
+# <<Drop>> ever fires. DND_URL first so tkdnd prefers the link target.
+_DND_URL = "DND_URL"     # -> UniformResourceLocator(W)
+_DND_HTML = "DND_HTML"   # -> CF_HTML, {HTML Format}
+_DND_DROP_TYPES = (_DND_URL, _DND_HTML, _DND_TEXT)
+
 URL_PATTERN = re.compile(r"https?://\S+")
 # DEV_USERNAME / DEV_PASSWORD now live in core/dev_access.py, which also
 # handles any additionally-granted developer accounts - see check_dev_credentials.
@@ -1059,60 +1069,39 @@ class App(*_APP_BASES):
     # 1.6.1 - drag a video thumbnail from a browser onto the window
     # ------------------------------------------------------------------
     def _wire_drag_and_drop(self):
-        """Register the whole window - and every widget in it - as tkdnd
-        drop targets, so dropping a browser thumbnail/link anywhere on the
-        app routes its URL by the current mode. On Windows each Tk widget is
-        its own OLE drop window, so a drop only reaches a target that is
-        itself registered; registering the full tree is what makes "drop
-        anywhere" actually work. No-op unless self._dnd_ok."""
+        """Register the top-level window as a tkdnd drop target so a browser
+        thumbnail/link dropped anywhere on the app routes its URL by the
+        current mode. Only the root is registered: tkdnd's HandlePosition
+        walks from the widget under the cursor up through winfo_parent to the
+        toplevel (tkdnd_generic.tcl), so a single root registration already
+        catches drops over any child - old and new alike - with no per-widget
+        focus-steal and no ~1ms-each startup cost of walking the tree. No-op
+        unless self._dnd_ok."""
         from core.startup_log import mark
         if not getattr(self, "_dnd_ok", False):
             mark("drag-and-drop wiring skipped (_dnd_ok is False)")
             return
-        # DND_TEXT is the reliable one everywhere; the richer types are
-        # registered best-effort (some tkdnd builds reject unknown names).
-        types = [_DND_TEXT, "CF_UNICODETEXT", "text/uri-list", "text/plain",
-                 "text/html", "CF_TEXT"]
-
-        def register(widget):
-            got_one = False
-            for t in types:
+        ok = False
+        try:
+            self.drop_target_register(*_DND_DROP_TYPES)
+            ok = True
+        except Exception:
+            # Some tkdnd builds reject an unknown name in a multi-type call -
+            # fall back to registering each type on its own.
+            for t in _DND_DROP_TYPES:
                 try:
-                    widget.drop_target_register(t)
-                    got_one = True
+                    self.drop_target_register(t)
+                    ok = True
                 except Exception:
                     pass
-            if got_one:
-                try:
-                    widget.dnd_bind("<<Drop>>", self._on_thumbnail_drop)
-                    return 1
-                except Exception:
-                    return 0
-            return 0
-
-        wired = 0
-
-        def walk(widget):
-            nonlocal wired
-            wired += register(widget)
-            # CustomTkinter wraps a real tk Entry/Text inside a frame - the
-            # inner widget is what actually sits under the cursor on a drop.
-            for inner_attr in ("_entry", "_textbox", "_canvas"):
-                inner = getattr(widget, inner_attr, None)
-                if inner is not None and hasattr(inner, "drop_target_register"):
-                    wired += register(inner)
+        if ok:
             try:
-                children = widget.winfo_children()
-            except Exception:
-                children = []
-            for c in children:
-                walk(c)
-
-        try:
-            walk(self)
-        except Exception as e:
-            mark(f"drag-and-drop tree walk aborted (non-fatal): {e}")
-        mark(f"drag-and-drop wired on {wired} target(s)")
+                self.dnd_bind("<<Drop>>", self._on_thumbnail_drop)
+                mark("drag-and-drop wired on the main window")
+            except Exception as e:
+                mark(f"drag-and-drop bind failed (non-fatal): {e}")
+        else:
+            mark("drag-and-drop: no drop types accepted (non-fatal)")
 
     def _extract_video_url(self, raw):
         """Thin instance wrapper around core.drag_drop.extract_video_url so
@@ -1123,58 +1112,71 @@ class App(*_APP_BASES):
             self._log(f"Drag-and-drop: URL parse error ({e}).")
             return None
 
+    # yt-dlp treats these as "download everything under here" - a drop onto
+    # them should pre-fill but never auto-start without the user confirming.
+    _DND_BULK_URL_RE = re.compile(
+        r"(?:/@[^/?#]+(?:/?$|/(?:videos|streams|shorts|playlists)?/?$)"
+        r"|/channel/|/c/|/user/|[?&]list=)", re.IGNORECASE)
+
     def _on_thumbnail_drop(self, event):
-        """<<Drop>> handler. Fires on the Tk main thread (tkdnd posts it via
-        the normal event loop), so touching widgets here is safe."""
+        """<<Drop>> handler. tkdnd runs this synchronously inside the OLE
+        IDropTarget::Drop callback (uplevel #0), while the source browser's
+        drag loop is still blocked - so it must return immediately. The real
+        work (which can open modal dialogs / a folder picker / start a
+        download) is punted to the next idle turn."""
         raw = getattr(event, "data", "") or ""
-        url = self._extract_video_url(raw)
-        if not url:
-            self._log("Drag-and-drop: couldn't find a video URL in what was dropped.")
-            return _DND_COPY
-
-        on_download_tab = (getattr(self, "tabview", None) is not None
-                           and self.tabview.get() == "Download")
-        on_batch_tab = (on_download_tab
-                        and getattr(self, "inner_tabview", None) is not None
-                        and self.inner_tabview.get() == "Batch Queue")
-
-        if on_batch_tab and self.cfg.get("dynamic_batch_queue_enabled", False):
-            self._batch_urls.append(url)
-            self._refresh_batch_dynamic_list()
-            self._log(f"Drag-and-drop: added to the dynamic batch queue - {url}")
-        elif on_batch_tab:
-            existing = self.batch_box.get("1.0", "end").rstrip()
-            self.batch_box.delete("1.0", "end")
-            self.batch_box.insert("1.0", (existing + "\n" + url + "\n") if existing else (url + "\n"))
-            self.batch_box.see("end")
-            self._log(f"Drag-and-drop: added to the batch list - {url}")
-        elif on_download_tab:
-            # Single Download sub-tab (or the Download tab generally):
-            # fill the URL and start the download straight away.
-            try:
-                self.inner_tabview.set("Single Download")
-            except Exception:
-                pass
-            self.url_entry.delete(0, "end")
-            self.url_entry.insert(0, url)
-            self._log(f"Drag-and-drop: starting download - {url}")
-            self.start_single_download()
-        else:
-            # Dropped while on some other top-level tab (Media/History/
-            # Settings/...). Switch to Single Download and pre-fill the URL,
-            # but don't auto-start - the drop was far from the download UI,
-            # so let the user press Download themselves.
-            try:
-                self.tabview.set("Download")
-                self.inner_tabview.set("Single Download")
-            except Exception:
-                pass
-            self.url_entry.delete(0, "end")
-            self.url_entry.insert(0, url)
-            self.url_entry.focus_set()
-            self._log(f"Drag-and-drop: URL ready on the Single Download tab - "
-                      f"press Download to start - {url}")
+        self.after(0, lambda: self._handle_dropped_payload(raw))
         return _DND_COPY
+
+    def _handle_dropped_payload(self, raw):
+        try:
+            url = self._extract_video_url(raw)
+            if not url:
+                self._log("Drag-and-drop: couldn't find a video URL in what was dropped.")
+                return
+
+            on_download_tab = (getattr(self, "tabview", None) is not None
+                               and self.tabview.get() == "Download")
+            on_batch_tab = (on_download_tab
+                            and getattr(self, "inner_tabview", None) is not None
+                            and self.inner_tabview.get() == "Batch Queue")
+
+            if on_batch_tab and self.cfg.get("dynamic_batch_queue_enabled", False):
+                self._batch_urls.append(url)
+                self._refresh_batch_dynamic_list()
+                self._log(f"Drag-and-drop: added to the dynamic batch queue - {url}")
+            elif on_batch_tab:
+                existing = self.batch_box.get("1.0", "end").rstrip()
+                self.batch_box.delete("1.0", "end")
+                self.batch_box.insert("1.0", (existing + "\n" + url + "\n") if existing else (url + "\n"))
+                self.batch_box.see("end")
+                self._log(f"Drag-and-drop: added to the batch list - {url}")
+            else:
+                # Single Download: switch there, pre-fill the URL. Auto-start
+                # only for a normal single video and only when nothing is
+                # already downloading; a channel/playlist URL or a busy
+                # downloader just pre-fills and waits for the user.
+                try:
+                    self.tabview.set("Download")
+                    self.inner_tabview.set("Single Download")
+                except Exception:
+                    pass
+                self.url_entry.delete(0, "end")
+                self.url_entry.insert(0, url)
+                bulk = bool(self._DND_BULK_URL_RE.search(url))
+                busy = self._single_download_busy()
+                if on_download_tab and not bulk and not busy:
+                    self._log(f"Drag-and-drop: starting download - {url}")
+                    self.start_single_download()
+                else:
+                    self.url_entry.focus_set()
+                    why = ("a download is already running" if busy
+                           else "that looks like a channel/playlist" if bulk
+                           else "dropped from another tab")
+                    self._log(f"Drag-and-drop: URL ready on Single Download ({why}) - "
+                              f"press Download to start - {url}")
+        except Exception as e:
+            self._log(f"Drag-and-drop: could not handle the drop ({e}).")
 
     def _add_clear_button(self, parent, entry_widget, also_clear_thumbnail=False):
         def do_clear():
@@ -1776,6 +1778,17 @@ class App(*_APP_BASES):
             self.mini_log_label.configure(text=getattr(self, "_last_mini_log_text", ""))
 
     # ------------------------------------------------------------------ #
+    def _single_download_busy(self):
+        """True while a single/batch/playlist download is running. Uses the
+        same signal the UI does - the Download button is disabled for the
+        whole run by _set_downloading_state - so a drag-and-drop auto-start
+        can't spin up a second download that would clobber self.downloader
+        and desync Cancel/progress."""
+        try:
+            return str(self.download_btn.cget("state")) == "disabled" or getattr(self, "batch_running", False)
+        except Exception:
+            return False
+
     def start_single_download(self):
         url = self.url_entry.get().strip()
         name = self.name_entry.get().strip()
@@ -1783,6 +1796,9 @@ class App(*_APP_BASES):
 
         if not url:
             messagebox.showwarning("Missing URL", "Please enter a URL.")
+            return
+        if self._single_download_busy():
+            self._log("A download is already running - finish or cancel it first.")
             return
         # Name is no longer required - if left blank, _run_single fetches
         # the video's own title and uses that instead.

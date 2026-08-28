@@ -24,11 +24,11 @@ self-tests.
 """
 import re
 
-# YouTube video ids are always exactly 11 chars from this alphabet.
-_YT_ID = r"[A-Za-z0-9_-]{11}"
-
-# Trailing junk that commonly rides along on a dragged URL.
-_TRAILING_JUNK = "\"'.,;)]}>"
+# YouTube video ids are always exactly 11 chars from this alphabet. The
+# right-boundary lookahead stops a 12+-char slug being truncated to a
+# *different, valid* 11-char id (which, with auto-start, downloads the
+# wrong video).
+_YT_ID = r"[A-Za-z0-9_-]{11}(?![A-Za-z0-9_-])"
 
 # File extensions that mean "this is a static image/asset, not a video page".
 _IMG_EXT_RE = re.compile(
@@ -37,12 +37,27 @@ _IMG_EXT_RE = re.compile(
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
+_CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def _is_http(s):
+    return bool(s) and s.lower().startswith(("http://", "https://"))
+
 
 def _clean(url):
     if not url:
         return url
     url = url.strip().strip("<>").strip("\"'")
-    url = url.rstrip(_TRAILING_JUNK)
+    # Trim trailing sentence punctuation a URL picks up when dragged out of
+    # prose - but conservatively: one pass of quote/comma/period/semicolon,
+    # then close brackets only while they're genuinely unbalanced, so
+    # ".../Heat_(1995_film)" keeps its parenthesis.
+    url = url.rstrip("\"'.,;")
+    while url and url[-1] in _CLOSERS:
+        if url.count(url[-1]) > url.count(_CLOSERS[url[-1]]):
+            url = url[:-1]
+        else:
+            break
     return url
 
 
@@ -168,14 +183,20 @@ def extract_video_url(raw):
             return u
 
     # 3. Any http(s) URL that is not obviously a static image asset.
+    #    When the candidate IS itself a URL (e.g. recovered from tkdnd's
+    #    {...} wrapping), take it whole - re-running _URL_RE would truncate
+    #    it at the first space, undoing the point of honoring the braces.
     for c in cleaned:
-        m = _URL_RE.search(c)
-        if m and not _IMG_EXT_RE.search(m.group(0)):
-            return _clean(m.group(0))
+        cand = c if _is_http(c) else (_URL_RE.search(c).group(0)
+                                      if _URL_RE.search(c) else None)
+        if cand and not _IMG_EXT_RE.search(cand):
+            return _clean(cand)
 
     # 4. Last resort: any http(s) URL at all - yt-dlp may still handle it,
     #    and if not, the fetch step gives the user a clear error.
     for c in cleaned:
+        if _is_http(c):
+            return _clean(c)
         m = _URL_RE.search(c)
         if m:
             return _clean(m.group(0))
@@ -218,6 +239,18 @@ if __name__ == "__main__":
          "https://www.youtube.com/watch?v=abc123DEFgh"),
         ("https://cdn.example.com/lonely-thumbnail.jpg",
          "https://cdn.example.com/lonely-thumbnail.jpg"),
+        # a 12+ char slug must NOT be truncated to a different valid id
+        ("https://youtu.be/abcdefghijkLMNOP",
+         "https://youtu.be/abcdefghijkLMNOP"),
+        # a real paren in the path is kept (balanced)
+        ("https://en.wikipedia.org/wiki/Heat_(1995_film)",
+         "https://en.wikipedia.org/wiki/Heat_(1995_film)"),
+        # dragged out of a sentence - trailing period trimmed
+        ("see https://example.com/clip.mp4.",
+         "https://example.com/clip.mp4"),
+        # brace-wrapped URL that contains a space is recovered whole
+        ("{https://example.com/my file.mp4}",
+         "https://example.com/my file.mp4"),
         ("not a url at all", None),
         ("", None),
         (None, None),
