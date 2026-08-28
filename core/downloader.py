@@ -176,12 +176,27 @@ def fetch_title(url):
 
 
 class PlaylistFetchTimeout(Exception):
-    """Raised when a playlist lookup returns NOTHING at all within the
-    stall window (see fetch_playlist_info) - i.e. it's genuinely hung, not
-    just large. A large-but-progressing playlist is never raised on: the
-    timeout is a "no new entry seen" stall timeout, not a total-time cap,
-    so a huge playlist that keeps streaming entries is allowed to finish."""
+    """Raised when a playlist lookup makes no progress within the per-window
+    timeout - genuinely hung, not just large. See fetch_playlist_info."""
     pass
+
+
+class PlaylistFetchCancelled(Exception):
+    """Raised when the caller's cancel_event is set during a playlist lookup
+    (e.g. the Cancel button) - distinct from a timeout so the GUI doesn't
+    show a scary 'timed out' error for a deliberate cancel."""
+    pass
+
+
+_PLAYLIST_WINDOW = 300        # entries fetched per bounded extract_info call
+_PLAYLIST_MAX_WINDOWS = 2000  # sanity cap (~600k entries) against a runaway paginator
+
+
+def _coerce_timeout(value, default=60):
+    try:
+        return max(15, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
@@ -189,46 +204,60 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
     downloading anything. Used to name the auto-created playlist when
     'Download playlist' is on and to get the list of entry URLs to fetch.
 
-    Robust for very large playlists: yt-dlp is run with lazy_playlist so
-    entries stream in, and a worker thread pushes each one onto a queue as
-    it arrives. The bound here is a STALL timeout - the max seconds with no
-    new entry (and no initial response) - not a fixed total budget, so a
-    playlist with tens of thousands of entries that keeps making progress
-    runs to completion. If entries did start arriving and then it stalls,
-    whatever was collected so far is returned (enough to name the playlist
-    and download the reachable items) rather than failing outright.
+    Enumerates the playlist in BOUNDED WINDOWS (_PLAYLIST_WINDOW entries per
+    yt-dlp call via `playlist_items`), in a worker thread that pushes each
+    entry onto a queue as its window resolves. `timeout_seconds` is applied
+    per window (no new progress for that long -> treated as hung), not as a
+    total budget, so a playlist with tens of thousands of entries that keeps
+    making progress runs to completion. If some entries were collected and
+    then it stalls, that partial list is returned rather than failing.
 
-    cancel_event: an optional threading.Event; when set, enumeration stops
-    and partial results are returned (or PlaylistFetchTimeout if nothing
-    had come back yet).
+    cancel_event: optional threading.Event; when set, enumeration stops
+    within ~1s and PlaylistFetchCancelled is raised.
 
-    Raises DownloadStageError('playlist info fetch', ...) on a hard
-    extractor failure with no partial results, or PlaylistFetchTimeout if
-    nothing at all was returned within the stall window."""
-    # The initial playlist page can be slow on a huge list even before the
-    # first entry - give it a generous floor, then rely on per-entry
-    # progress after that.
-    stall_timeout = max(120, int(timeout_seconds) * 2)
+    Raises: PlaylistFetchCancelled on cancel; PlaylistFetchTimeout if a
+    window makes no progress in time and nothing was collected;
+    DownloadStageError('playlist info fetch', ...) on a hard extractor
+    failure with no partial results."""
+    window_timeout = _coerce_timeout(timeout_seconds)
     result_queue = queue.Queue()
-    internal_stop = threading.Event()  # set by the stall path; distinct from the caller's cancel
+    internal_stop = threading.Event()  # main thread -> worker: stop now
 
-    def stopped():
+    def cancelled():
         return internal_stop.is_set() or (cancel_event is not None and cancel_event.is_set())
 
     def worker():
-        options = {"quiet": True, "no_warnings": True, "skip_download": True,
-                   "extract_flat": "in_playlist", "noplaylist": False,
-                   "lazy_playlist": True,
-                   "socket_timeout": max(15, min(int(timeout_seconds), 60))}
-        options.update(_ffmpeg_options())
+        base = {"quiet": True, "no_warnings": True, "skip_download": True,
+                "extract_flat": "in_playlist", "noplaylist": False,
+                "ignoreerrors": True,
+                "socket_timeout": max(15, min(window_timeout, 60))}
+        base.update(_ffmpeg_options())
         try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=False)
-            result_queue.put(("meta", {k: info.get(k) for k in ("title", "id", "webpage_url")}))
-            for entry in (info.get("entries") or []):
-                if stopped():
+            start, sent_meta = 1, False
+            for _ in range(_PLAYLIST_MAX_WINDOWS):
+                if cancelled():
                     break
-                result_queue.put(("entry", entry))
+                opts = dict(base, playlist_items=f"{start}:{start + _PLAYLIST_WINDOW - 1}")
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info is None:
+                        if not sent_meta:
+                            result_queue.put(("error", ValueError(
+                                "This URL didn't return any playlist data.")))
+                            return
+                        break
+                    if not sent_meta:
+                        result_queue.put(("meta", {k: info.get(k)
+                                                   for k in ("title", "id", "webpage_url")}))
+                        sent_meta = True
+                    window = [e for e in (info.get("entries") or []) if e]
+                for entry in window:
+                    if cancelled():
+                        break
+                    result_queue.put(("entry", entry))
+                if len(window) < _PLAYLIST_WINDOW or cancelled():
+                    break
+                start += _PLAYLIST_WINDOW
             result_queue.put(("done", None))
         except Exception as e:
             result_queue.put(("error", e))
@@ -236,21 +265,24 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
 
-    meta = {}
-    collected = []
+    meta, collected = {}, []
+    last_progress = time.monotonic()
     while True:
-        try:
-            kind, payload = result_queue.get(timeout=stall_timeout)
-        except queue.Empty:
-            # Nothing for `stall_timeout` seconds - treat as hung. The
-            # daemon worker is abandoned (Python can't force-kill a thread);
-            # its later result is simply never read.
+        if cancel_event is not None and cancel_event.is_set():
             internal_stop.set()
-            if not collected and not meta:
-                raise PlaylistFetchTimeout(
-                    f"This playlist returned nothing within {stall_timeout}s and was treated as hung. "
-                    f"Raise the timeout in Settings > Advanced if it's just very large or slow.")
-            break  # some progress was made - use what we have
+            raise PlaylistFetchCancelled("Playlist lookup was cancelled.")
+        try:
+            kind, payload = result_queue.get(timeout=1.0)
+        except queue.Empty:
+            if time.monotonic() - last_progress > window_timeout:
+                internal_stop.set()  # abandon the worker (can't force-kill a thread)
+                if not collected and not meta:
+                    raise PlaylistFetchTimeout(
+                        f"This playlist made no progress for {window_timeout}s and was treated "
+                        f"as hung. Raise the timeout in Settings > Advanced if it's just very slow.")
+                break  # partial results
+            continue
+        last_progress = time.monotonic()
         if kind == "meta":
             meta = payload or {}
         elif kind == "entry":
@@ -263,13 +295,11 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
             break  # partial results are still useful
 
     if cancel_event is not None and cancel_event.is_set():
-        # An explicit cancel (Cancel button) - abort the whole operation
-        # rather than proceeding with a partial list.
-        raise PlaylistFetchTimeout("Playlist lookup was cancelled.")
+        raise PlaylistFetchCancelled("Playlist lookup was cancelled.")
 
-    entry_list = [{"title": e.get("title") or "Untitled",
-                   "url": e.get("url") or e.get("webpage_url") or url}
-                  for e in collected]
+    entry_list = [{"title": (e.get("title") or "Untitled"),
+                   "url": (e.get("url") or e.get("webpage_url") or url)}
+                  for e in collected if e]
     playlist_title = meta.get("title")
     if not playlist_title and entry_list:
         playlist_title = entry_list[0]["title"]

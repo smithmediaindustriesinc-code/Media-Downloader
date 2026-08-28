@@ -23,7 +23,7 @@ ctk.deactivate_automatic_dpi_awareness()
 
 from core.config import load_config, save_config
 from core.downloader import (Downloader, DownloadCancelled, DownloadStageError, YouTubeBotDetectedError,
-                              CookieAccessError, PlaylistFetchTimeout,
+                              CookieAccessError, PlaylistFetchTimeout, PlaylistFetchCancelled,
                               fetch_info, fetch_media_info, fetch_playlist_info, cleanup_partial_files, download_with_retry,
                               MAX_DOWNLOAD_ATTEMPTS,
                               VIDEO_QUALITIES, VIDEO_FORMATS, AUDIO_FORMATS, AUDIO_QUALITIES,
@@ -1851,6 +1851,10 @@ class App(ctk.CTk):
         try:
             info = fetch_playlist_info(url, timeout_seconds=timeout_s,
                                        cancel_event=self._playlist_lookup_cancel)
+        except PlaylistFetchCancelled:
+            self._threadsafe_log("Playlist lookup cancelled.")
+            self.after(0, lambda: self._set_downloading_state(False))
+            return
         except PlaylistFetchTimeout as e:
             self._threadsafe_log(str(e), color="red")
             self.after(0, lambda: self._set_downloading_state(False))
@@ -1885,8 +1889,8 @@ class App(ctk.CTk):
         self._batch_item_durations = []
         self._batch_items_remaining = len(entry_urls)
         for i, entry_url in enumerate(entry_urls, start=1):
-            if self.downloader and self.downloader._cancel:
-                break
+            if (self.downloader and self.downloader._cancel) or self._playlist_lookup_cancel.is_set():
+                break  # _playlist_lookup_cancel also covers a Cancel between lookup and item 1
             update_item(request_id, entry_url, status="downloading")
             self.after(0, lambda i=i, t=len(entry_urls): self.queue_progress_label.configure(text=f"Playlist item {i}/{t}"))
             self.downloader = Downloader(progress_callback=self._threadsafe_progress, log_callback=self._threadsafe_log,
