@@ -462,6 +462,9 @@ def fetch_download_size(url, dtype="Video", quality_key="Best", fmt="mp4",
         options = {
             "quiet": True, "no_warnings": True, "skip_download": True,
             "simulate": True, "noplaylist": True, "noprogress": True,
+            # Bound a hung extractor so a batch pre-fetch pass (and the
+            # Cancel that only gets polled between items) can't stall forever.
+            "socket_timeout": 15,
         }
         options.update(_ffmpeg_options())
         options.update(_cookie_options(cookies_from_browser))
@@ -513,8 +516,14 @@ class Downloader:
         self.item_start_time = None    # set when a single URL's download begins
         self.last_speed = None         # bytes/sec, from the most recent hook call (raw, unsmoothed)
         self.last_eta_seconds = None
-        self.last_total_bytes = None       # current item's total size (bytes), from the most recent hook call
-        self.last_downloaded_bytes = 0     # current item's bytes fetched so far, from the most recent hook call
+        self.last_total_bytes = None       # CURRENT STREAM's total size (bytes), from the most recent hook call
+        self.last_downloaded_bytes = 0     # CURRENT STREAM's bytes fetched so far, from the most recent hook call
+        # A merged video+audio download is two separate streams, each with
+        # its own hook sequence that resets downloaded_bytes to 0. This
+        # accumulates the finished streams' sizes so item_bytes_done() gives
+        # the whole item's progress (used for the size-based QUEUE ETA -
+        # the per-item ETA still uses the per-stream last_* values).
+        self._item_prev_streams_bytes = 0
         # ping_ms_provider: an optional zero-arg callable returning the
         # app's most recently measured connection latency (see
         # core/network_status.py) - used to scale the speed tracker's
@@ -534,6 +543,12 @@ class Downloader:
         if self.item_start_time is None:
             return 0.0
         return time.time() - self.item_start_time
+
+    def item_bytes_done(self):
+        """Whole current item's bytes fetched so far, across all of its
+        streams (video + audio counted together) - for the size-based
+        whole-queue ETA."""
+        return self._item_prev_streams_bytes + (self.last_downloaded_bytes or 0)
 
     def _hook(self, d):
         if self._cancel:
@@ -564,6 +579,13 @@ class Downloader:
             if self.progress_callback:
                 self.progress_callback(pct, speed)
         elif d.get("status") == "finished":
+            # One stream (of possibly two) done - roll its size into the
+            # cumulative item total and reset the per-stream counters so the
+            # next stream's hooks start from zero.
+            self._item_prev_streams_bytes += max(self.last_total_bytes or 0,
+                                                  self.last_downloaded_bytes or 0)
+            self.last_total_bytes = None
+            self.last_downloaded_bytes = 0
             self._log("Download finished, post-processing / merging...")
 
     def download_video(self, url, name, out_dir, quality_key, fmt,
@@ -576,6 +598,7 @@ class Downloader:
         self.last_eta_seconds = None
         self.last_total_bytes = None
         self.last_downloaded_bytes = 0
+        self._item_prev_streams_bytes = 0
         os_safe_dir = out_dir.rstrip("/\\")
         outtmpl = f"{os_safe_dir}/{name}.%(ext)s"
 
@@ -642,6 +665,7 @@ class Downloader:
         self.last_eta_seconds = None
         self.last_total_bytes = None
         self.last_downloaded_bytes = 0
+        self._item_prev_streams_bytes = 0
         os_safe_dir = out_dir.rstrip("/\\")
         outtmpl = f"{os_safe_dir}/{name}.%(ext)s"
         postprocessors = [{
