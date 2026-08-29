@@ -1837,14 +1837,18 @@ class App(*_APP_BASES):
         total_bytes = getattr(self, "_batch_total_bytes", 0) or 0
         remaining_items = getattr(self, "_batch_items_remaining", 0)
         queue_eta_seconds = None
-        if total_bytes > 0 and speed and speed > 0:
+        size_based = False
+        if total_bytes > 0 and remaining_items > 0 and speed and speed > 0:
             bytes_done = getattr(self, "_batch_bytes_done", 0) or 0
             cur_url = getattr(self, "_batch_current_url", None)
-            cur_known = cur_url in getattr(self, "_batch_size_by_url", {})
-            # Only subtract the current item's partial progress if its size is
-            # part of total_bytes - otherwise we'd double-count it out.
-            remaining_bytes = total_bytes - bytes_done - (item_done if cur_known else 0)
+            cur_known = cur_url is not None and cur_url in getattr(self, "_batch_size_by_url", {})
+            # The current item's WHOLE progress (video + audio streams
+            # together) - subtract it only if this item's size is part of
+            # total_bytes, otherwise we'd remove bytes that were never counted.
+            item_all = dl.item_bytes_done() if (dl and hasattr(dl, "item_bytes_done")) else item_done
+            remaining_bytes = total_bytes - bytes_done - (item_all if cur_known else 0)
             queue_eta_seconds = max(remaining_bytes, 0) / speed
+            size_based = True
         else:
             durations = getattr(self, "_batch_item_durations", None)
             if durations and remaining_items > 0:
@@ -1853,7 +1857,7 @@ class App(*_APP_BASES):
                 queue_eta_seconds = avg * (remaining_items - 1) + tail
         queue_eta = self._format_eta(queue_eta_seconds)
         if queue_eta:
-            note = "" if not self._batch_sizes_are_lower_bound() else " (min)"
+            note = " (min)" if (size_based and self._batch_sizes_are_lower_bound()) else ""
             parts.append(f"~{queue_eta} for whole queue{note}")
 
         self.eta_label.configure(text=" | ".join(parts))
@@ -2228,6 +2232,7 @@ class App(*_APP_BASES):
                     self.after(0, self._refresh_history_tab)
                     self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
                     self._batch_bytes_done += self._batch_size_by_url.get(entry_url, 0)
+                    self._batch_current_url = None  # nothing downloading during the skip pause
                     continue
 
             status, path = "Success", ""
@@ -2298,6 +2303,7 @@ class App(*_APP_BASES):
             self.after(0, self._refresh_history_tab)
             self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
             self._batch_bytes_done += self._batch_size_by_url.get(entry_url, 0)
+            self._batch_current_url = None  # nothing downloading during the inter-item delay
             if status == "Success":
                 self._batch_item_durations.append(self.downloader.elapsed_seconds())
 
@@ -2340,7 +2346,8 @@ class App(*_APP_BASES):
         aspect = self.aspect_var.get() if hasattr(self, "aspect_var") else "Any"
         cookies = self.cfg.get("cookies_from_browser", "none")
         known = 0
-        self._threadsafe_log(f"Pre-fetching file sizes... 0/{total}", color="blue")
+        self._threadsafe_log(f"Pre-fetching file sizes for {total} item(s) "
+                              f"(only sizes - nothing is downloaded yet)...", color="blue")
         for i, url in enumerate(urls, start=1):
             if cancel_check():
                 self._threadsafe_log("Size pre-fetch cancelled.", color="red")
@@ -2358,11 +2365,16 @@ class App(*_APP_BASES):
                 known += 1
             else:
                 self._batch_prefetch_had_unknowns = True
-            self._threadsafe_log(f"Pre-fetching file sizes... {i}/{total}", color="blue")
+            # Progress goes to the one-line queue label every item; the main
+            # log only gets a line every 10th, so a big playlist isn't 200
+            # lines of noise.
+            if i % 10 == 0 or i == total:
+                self._threadsafe_log(f"Pre-fetching file sizes... {i}/{total}", color="blue")
             if gap and i < total:
                 waited = 0.0
                 while waited < gap:
                     if cancel_check():
+                        self._threadsafe_log("Size pre-fetch cancelled.", color="red")
                         return
                     time.sleep(min(0.2, gap - waited))
                     waited += 0.2
@@ -2441,150 +2453,154 @@ class App(*_APP_BASES):
         self._batch_items_remaining = total
         self._reset_batch_size_state()
 
-        # Optional pre-fetch stage: size-only pass over the queue before any
-        # real download starts, so the ETAs below become size-based.
-        if self.cfg.get("batch_prefetch_sizes", False):
-            self._prefetch_cancel = threading.Event()
-            self._prefetch_batch_sizes(urls, dtype, lambda: self._prefetch_cancel.is_set())
-            cancelled = self._prefetch_cancel.is_set()
-            self._prefetch_cancel = None
-            if cancelled:
-                self.batch_running = False
-                finish_request(request_id)
-                self._threadsafe_log("Batch cancelled during size pre-fetch.", color="red")
-                self.after(0, lambda: self._set_downloading_state(False, batch=True))
-                self.after(0, self._refresh_requests_tab)
-                return
+        try:
+            # Optional pre-fetch stage: size-only pass over the queue before any
+            # real download starts, so the ETAs below become size-based.
+            if self.cfg.get("batch_prefetch_sizes", False):
+                self._prefetch_cancel = threading.Event()
+                self._prefetch_batch_sizes(urls, dtype, lambda: self._prefetch_cancel.is_set())
+                cancelled = self._prefetch_cancel.is_set()
+                if cancelled:
+                    self._threadsafe_log("Batch cancelled during size pre-fetch.", color="red")
+                    return  # try/finally below resets batch_running + UI state
 
-        for i, url in enumerate(urls, start=1):
-            if self.downloader and self.downloader._cancel:
-                break
-            self._batch_current_url = url
-            update_item(request_id, url, status="downloading")
-            self._threadsafe_log(f"--- Queue item {i}/{total} ---")
-            self.after(0, lambda i=i, total=total: self.queue_progress_label.configure(text=f"Queue item {i}/{total}"))
-            self.downloader = Downloader(progress_callback=self._threadsafe_progress, log_callback=self._threadsafe_log,
-                                          ping_ms_provider=lambda: self._network_ping)
-            history_entry_id = add_entry(url, url, dtype, "", "Analyzing")
-            self.after(0, self._refresh_history_tab)
-            media_info = None
-            try:
-                media_info = fetch_media_info(url)
-                name = sanitize_filename(beautify_title(media_info.get("title", f"download_{i}")))
-            except Exception as e:
-                self._threadsafe_log(f"Could not fetch info for {url}: {e}")
-                name = f"download_{i}"
+            for i, url in enumerate(urls, start=1):
+                if ((self.downloader and self.downloader._cancel)
+                        or (self._prefetch_cancel is not None and self._prefetch_cancel.is_set())):
+                    break
+                self._batch_current_url = url
+                update_item(request_id, url, status="downloading")
+                self._threadsafe_log(f"--- Queue item {i}/{total} ---")
+                self.after(0, lambda i=i, total=total: self.queue_progress_label.configure(text=f"Queue item {i}/{total}"))
+                self.downloader = Downloader(progress_callback=self._threadsafe_progress, log_callback=self._threadsafe_log,
+                                              ping_ms_provider=lambda: self._network_ping)
+                history_entry_id = add_entry(url, url, dtype, "", "Analyzing")
+                self.after(0, self._refresh_history_tab)
+                media_info = None
+                try:
+                    media_info = fetch_media_info(url)
+                    name = sanitize_filename(beautify_title(media_info.get("title", f"download_{i}")))
+                except Exception as e:
+                    self._threadsafe_log(f"Could not fetch info for {url}: {e}")
+                    name = f"download_{i}"
 
-            ext = self.cfg["video_format"] if dtype == "Video" else self.cfg["audio_format"]
-            unique_name = make_unique_name(out_dir, name, ext)
-            update_item(request_id, url, name=unique_name)
-            update_entry(history_entry_id, name=unique_name)
-            self.after(0, self._refresh_history_tab)
+                ext = self.cfg["video_format"] if dtype == "Video" else self.cfg["audio_format"]
+                unique_name = make_unique_name(out_dir, name, ext)
+                update_item(request_id, url, name=unique_name)
+                update_entry(history_entry_id, name=unique_name)
+                self.after(0, self._refresh_history_tab)
 
-            if self.cfg.get("duplicate_detection_enabled", True):
-                existing = find_previous_download(url, out_dir)
-                if existing:
-                    self._threadsafe_log(f"Skipped item {i}/{total} - already downloaded to "
-                                          f"{existing['path']}.", color="blue")
-                    update_item(request_id, url, status="skipped", path=existing["path"])
-                    update_entry(history_entry_id, path=existing["path"], status="Skipped (duplicate)")
+                if self.cfg.get("duplicate_detection_enabled", True):
+                    existing = find_previous_download(url, out_dir)
+                    if existing:
+                        self._threadsafe_log(f"Skipped item {i}/{total} - already downloaded to "
+                                              f"{existing['path']}.", color="blue")
+                        update_item(request_id, url, status="skipped", path=existing["path"])
+                        update_entry(history_entry_id, path=existing["path"], status="Skipped (duplicate)")
+                        self.after(0, self._refresh_history_tab)
+                        self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                        self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
+                        self._batch_current_url = None  # nothing downloading during the skip pause
+                        if delay_s and i < total:
+                            time.sleep(min(delay_s, 2))  # a short courtesy pause even on a skip, nothing more
+                        continue
+
+                status, path = "Success", ""
+                update_entry(history_entry_id, status="In Progress")
+                self.after(0, self._refresh_history_tab)
+                try:
+                    if dtype == "Video":
+                        self._threadsafe_log(f'Downloading "{unique_name}"', color="blue")
+                        path = download_with_retry(
+                            self.downloader.download_video, log_callback=self._threadsafe_log,
+                            url=url, name=unique_name, out_dir=out_dir,
+                            quality_key=self.cfg["video_quality"], fmt=self.cfg["video_format"],
+                            playlist=False, subtitles=self.subtitles_var.get(), aspect_ratio=self.aspect_var.get(),
+                            cookies_from_browser=self.cfg.get("cookies_from_browser", "none"),
+                            prefetched_info=media_info
+                        )
+                    else:
+                        self._threadsafe_log(f'Downloading "{unique_name}"', color="blue")
+                        path = download_with_retry(
+                            self.downloader.download_audio, log_callback=self._threadsafe_log,
+                            url=url, name=unique_name, out_dir=out_dir,
+                            quality=self.cfg["audio_quality"], fmt=self.cfg["audio_format"],
+                            playlist=False, embed_thumbnail=self.cfg.get("embed_thumbnail", True),
+                            cookies_from_browser=self.cfg.get("cookies_from_browser", "none")
+                        )
+                    self._threadsafe_log(f"Saved: {path}")
+                    update_item(request_id, url, status="success", path=path,
+                                elapsed_seconds=self.downloader.elapsed_seconds())
+                except DownloadCancelled:
+                    self._threadsafe_log("Batch cancelled.")
+                    status = "Cancelled"
+                    removed, still_locked = cleanup_partial_files(out_dir, unique_name)
+                    if removed:
+                        self._threadsafe_log(f"Removed {len(removed)} partial file(s) from the cancelled item.")
+                    if still_locked:
+                        self._threadsafe_log(f"{len(still_locked)} partial file(s) still in use, couldn't be "
+                                              f"removed - you may need to delete them manually.", color="red")
+                    update_item(request_id, url, status="failed", error="Cancelled by user")
+                    update_entry(history_entry_id, path=path, status=status)
                     self.after(0, self._refresh_history_tab)
-                    self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
-                    self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
-                    if delay_s and i < total:
-                        time.sleep(min(delay_s, 2))  # a short courtesy pause even on a skip, nothing more
-                    continue
+                    break
+                except YouTubeBotDetectedError:
+                    status = "Failed"
+                    self._handle_bot_detection(request_id, url)
+                    update_entry(history_entry_id, path=path, status=status)
+                    self.after(0, self._refresh_history_tab)
+                    break  # stop the whole queue, not just this item - see _handle_bot_detection
+                except CookieAccessError:
+                    status = "Failed"
+                    self._handle_cookie_access_error(request_id, url)
+                    update_entry(history_entry_id, path=path, status=status)
+                    self.after(0, self._refresh_history_tab)
+                    break
+                except DownloadStageError as e:
+                    status = "Failed"
+                    err = f"Failed during {e.stage} for {url}: {e.original}"
+                    self._threadsafe_log(err, color="red")
+                    update_item(request_id, url, status="failed", error=err,
+                                elapsed_seconds=self.downloader.elapsed_seconds())
+                except Exception as e:
+                    status = "Failed"
+                    err = f"Unexpected error for {url}: {e}"
+                    self._threadsafe_log(err, color="red")
+                    update_item(request_id, url, status="failed", error=err,
+                                elapsed_seconds=self.downloader.elapsed_seconds())
+                update_entry(history_entry_id, name=unique_name, path=path, status=status)
+                self.after(0, self._refresh_history_tab)
+                self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
+                self._batch_current_url = None  # nothing downloading during the inter-item delay
+                if status == "Success":
+                    self._batch_item_durations.append(self.downloader.elapsed_seconds())
 
-            status, path = "Success", ""
-            update_entry(history_entry_id, status="In Progress")
+                # Space requests out - helps avoid triggering YouTube's bot
+                # detection in the first place, not just react to it after
+                # the fact. Skipped after the very last item (nothing left to
+                # wait for) and broken into small checks against cancel so a
+                # long delay doesn't make the Cancel button feel unresponsive.
+                if delay_s and i < total and not (self.downloader and self.downloader._cancel):
+                    waited = 0.0
+                    while waited < delay_s:
+                        if self.downloader and self.downloader._cancel:
+                            break
+                        time.sleep(min(0.25, delay_s - waited))
+                        waited += 0.25
+
+        except Exception as e:
+            self._threadsafe_log(f"Batch queue stopped on an unexpected error: {e}", color="red")
+        else:
+            self._threadsafe_log("Batch queue finished.", color="green")
+        finally:
+            self.batch_running = False
+            self._batch_current_url = None
+            self._prefetch_cancel = None
+            finish_request(request_id)
+            self.after(0, lambda: self._set_downloading_state(False, batch=True))
             self.after(0, self._refresh_history_tab)
-            try:
-                if dtype == "Video":
-                    self._threadsafe_log(f'Downloading "{unique_name}"', color="blue")
-                    path = download_with_retry(
-                        self.downloader.download_video, log_callback=self._threadsafe_log,
-                        url=url, name=unique_name, out_dir=out_dir,
-                        quality_key=self.cfg["video_quality"], fmt=self.cfg["video_format"],
-                        playlist=False, subtitles=self.subtitles_var.get(), aspect_ratio=self.aspect_var.get(),
-                        cookies_from_browser=self.cfg.get("cookies_from_browser", "none"),
-                        prefetched_info=media_info
-                    )
-                else:
-                    self._threadsafe_log(f'Downloading "{unique_name}"', color="blue")
-                    path = download_with_retry(
-                        self.downloader.download_audio, log_callback=self._threadsafe_log,
-                        url=url, name=unique_name, out_dir=out_dir,
-                        quality=self.cfg["audio_quality"], fmt=self.cfg["audio_format"],
-                        playlist=False, embed_thumbnail=self.cfg.get("embed_thumbnail", True),
-                        cookies_from_browser=self.cfg.get("cookies_from_browser", "none")
-                    )
-                self._threadsafe_log(f"Saved: {path}")
-                update_item(request_id, url, status="success", path=path,
-                            elapsed_seconds=self.downloader.elapsed_seconds())
-            except DownloadCancelled:
-                self._threadsafe_log("Batch cancelled.")
-                status = "Cancelled"
-                removed, still_locked = cleanup_partial_files(out_dir, unique_name)
-                if removed:
-                    self._threadsafe_log(f"Removed {len(removed)} partial file(s) from the cancelled item.")
-                if still_locked:
-                    self._threadsafe_log(f"{len(still_locked)} partial file(s) still in use, couldn't be "
-                                          f"removed - you may need to delete them manually.", color="red")
-                update_item(request_id, url, status="failed", error="Cancelled by user")
-                update_entry(history_entry_id, path=path, status=status)
-                self.after(0, self._refresh_history_tab)
-                break
-            except YouTubeBotDetectedError:
-                status = "Failed"
-                self._handle_bot_detection(request_id, url)
-                update_entry(history_entry_id, path=path, status=status)
-                self.after(0, self._refresh_history_tab)
-                break  # stop the whole queue, not just this item - see _handle_bot_detection
-            except CookieAccessError:
-                status = "Failed"
-                self._handle_cookie_access_error(request_id, url)
-                update_entry(history_entry_id, path=path, status=status)
-                self.after(0, self._refresh_history_tab)
-                break
-            except DownloadStageError as e:
-                status = "Failed"
-                err = f"Failed during {e.stage} for {url}: {e.original}"
-                self._threadsafe_log(err, color="red")
-                update_item(request_id, url, status="failed", error=err,
-                            elapsed_seconds=self.downloader.elapsed_seconds())
-            except Exception as e:
-                status = "Failed"
-                err = f"Unexpected error for {url}: {e}"
-                self._threadsafe_log(err, color="red")
-                update_item(request_id, url, status="failed", error=err,
-                            elapsed_seconds=self.downloader.elapsed_seconds())
-            update_entry(history_entry_id, name=unique_name, path=path, status=status)
-            self.after(0, self._refresh_history_tab)
-            self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
-            self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
-            if status == "Success":
-                self._batch_item_durations.append(self.downloader.elapsed_seconds())
-
-            # Space requests out - helps avoid triggering YouTube's bot
-            # detection in the first place, not just react to it after
-            # the fact. Skipped after the very last item (nothing left to
-            # wait for) and broken into small checks against cancel so a
-            # long delay doesn't make the Cancel button feel unresponsive.
-            if delay_s and i < total and not (self.downloader and self.downloader._cancel):
-                waited = 0.0
-                while waited < delay_s:
-                    if self.downloader and self.downloader._cancel:
-                        break
-                    time.sleep(min(0.25, delay_s - waited))
-                    waited += 0.25
-
-        self.batch_running = False
-        self._batch_current_url = None
-        finish_request(request_id)
-        self._threadsafe_log("Batch queue finished.", color="green")
-        self.after(0, lambda: self._set_downloading_state(False, batch=True))
-        self.after(0, self._refresh_history_tab)
-        self.after(0, self._refresh_requests_tab)
+            self.after(0, self._refresh_requests_tab)
 
     # ------------------------------------------------------------------ #
     def _set_downloading_state(self, downloading, batch=False):
@@ -3763,11 +3779,13 @@ class App(*_APP_BASES):
         ctk.CTkSwitch(prefetch_switch_row, text="Pre-fetch file sizes before a batch", font=self.font_normal,
                       variable=self.batch_prefetch_sizes_var,
                       command=self._on_batch_prefetch_sizes_changed).pack(side="left")
-        self._add_hint_icon(prefetch_switch_row, "Before a batch or full-playlist download starts, do a quick "
+        self._add_hint_icon(prefetch_switch_row, "Before a batch or full-playlist download starts, do a "
                              "pass that fetches ONLY each item's download size (nothing is downloaded yet). "
                              "The queue's \"time remaining\" and each item's ETA are then based on bytes left "
-                             "over the current average speed, instead of just the number of items left. Adds a "
-                             "short delay up front and a few extra requests; off by default.").pack(
+                             "over the current average speed, instead of just the number of items left.\n\n"
+                             "This makes one extra lookup per item and waits between them (using your batch "
+                             "delay), so on a large playlist it can take a few minutes before the first "
+                             "download begins - you can Cancel during the pass. Off by default.").pack(
             side="left", padx=(8, 0))
 
         # ============================================================ #
