@@ -196,6 +196,13 @@ class App(ctk.CTk):
         self._network_ping = None
         self._speed_tick_active = False
         self._last_progress_pct = 0
+        # Every currently-open "?" hint popup / hover tooltip registers a
+        # close callback here so they can all be force-shut at once - on a
+        # tab switch, on a click anywhere, or by their own watchdog. Fixes
+        # the popups that used to get stranded on screen when <Leave>
+        # never fired (fast pointer move, the anchor being destroyed under
+        # them, the window losing focus, etc).
+        self._hint_popups = []
 
         mark("about to call _build_fonts()")
         self._build_fonts()
@@ -206,6 +213,12 @@ class App(ctk.CTk):
 
         self._start_clipboard_watch()
         mark("clipboard watch started")
+
+        # A click anywhere in the app dismisses any open "?" hint popup /
+        # hover tooltip (the "?" icon's own click returns "break" so it
+        # can still toggle its popup open). add="+" keeps every existing
+        # widget binding intact.
+        self.bind("<Button-1>", self._close_all_hint_popups, add="+")
 
         # The window is never withdrawn/hidden during startup (there's
         # nothing that needs to block it - the download folder is now
@@ -1097,6 +1110,115 @@ class App(ctk.CTk):
         handle._resize_test_hooks = (on_press, on_drag, on_release)  # exposed purely for direct testing
         return handle
 
+    def _close_all_hint_popups(self, _event=None):
+        """Force every open "?" hint / hover tooltip popup shut. Bound to
+        a click anywhere in the app and called on every main-tab switch,
+        so a popup can never be left floating over unrelated content."""
+        for closer in list(getattr(self, "_hint_popups", [])):
+            try:
+                closer()
+            except Exception:
+                pass
+
+    def _make_hint_popup(self, anchor, build_body, *, x_offset=0):
+        """Shared, leak-proof machinery behind both the "?" hint icons and
+        the plain hover tooltips. `anchor` is the widget the popup hangs
+        off; `build_body(win)` fills the new Toplevel in. Returns
+        (open_fn, close_fn, state) - `state["win"]` is the live Toplevel
+        or None (kept as a dict so existing direct tests keep working).
+
+        The popup is guaranteed to close on ANY of: the pointer leaving
+        both the anchor and the popup, the anchor widget being destroyed,
+        a main-tab switch, a click anywhere in the app, or a ~0.4s
+        watchdog tick finding the pointer nowhere near it. That watchdog
+        is the real backstop - it doesn't depend on <Leave> ever firing."""
+        state = {"win": None, "watch": None}
+
+        def _anchor_alive():
+            try:
+                return bool(anchor.winfo_exists())
+            except Exception:
+                return False
+
+        def _pointer_near():
+            try:
+                px, py = self.winfo_pointerxy()
+            except Exception:
+                return False
+            for w in (anchor, state["win"]):
+                if w is None:
+                    continue
+                try:
+                    if not w.winfo_exists():
+                        continue
+                    wx, wy = w.winfo_rootx(), w.winfo_rooty()
+                    if wx <= px <= wx + w.winfo_width() and wy <= py <= wy + w.winfo_height():
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        def _cancel_watch():
+            if state["watch"] is not None:
+                try:
+                    self.after_cancel(state["watch"])
+                except Exception:
+                    pass
+                state["watch"] = None
+
+        def close():
+            _cancel_watch()
+            win = state["win"]
+            state["win"] = None
+            if win is not None:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+            try:
+                self._hint_popups.remove(close)
+            except (ValueError, AttributeError):
+                pass
+
+        def _watchdog():
+            state["watch"] = None
+            if state["win"] is None:
+                return
+            if not _anchor_alive() or not _pointer_near():
+                close()
+                return
+            state["watch"] = self.after(400, _watchdog)
+
+        def open():
+            if state["win"] is not None or not _anchor_alive():
+                return
+            try:
+                win = ctk.CTkToplevel(anchor)
+                win.overrideredirect(True)
+                win.attributes("-topmost", True)
+                build_body(win)
+                x = anchor.winfo_rootx() + x_offset
+                y = anchor.winfo_rooty() + anchor.winfo_height() + 4
+                win.geometry(f"+{x}+{y}")
+            except Exception:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                return
+            win.bind("<Leave>", lambda e: self.after(
+                60, lambda: None if _pointer_near() else close()))
+            state["win"] = win
+            self._hint_popups.append(close)
+            state["watch"] = self.after(400, _watchdog)
+
+        def guarded_close(_event=None):
+            # Leaving the anchor closes the popup UNLESS the pointer has
+            # simply moved onto the popup itself (it sits a few px below).
+            self.after(60, lambda: None if _pointer_near() else close())
+
+        return open, close, state, guarded_close
+
     def _add_hint_icon(self, parent, text, wraplength=320):
         """A small, low-profile circular question-mark that shows the
         given explanatory text on hover OR click (click toggles it - for
@@ -1110,39 +1232,20 @@ class App(ctk.CTk):
         hint = ctk.CTkLabel(parent, text="?", font=ctk.CTkFont(size=11, weight="bold"),
                              width=18, height=18, corner_radius=9, fg_color=("gray75", "gray30"),
                              text_color=("gray20", "gray85"), cursor="hand2")
-        tip = {"win": None}
 
-        def open_tip():
-            if tip["win"] is not None:
-                return
-            x = hint.winfo_rootx()
-            y = hint.winfo_rooty() + hint.winfo_height() + 4
-            win = ctk.CTkToplevel(hint)
-            win.overrideredirect(True)
-            win.geometry(f"+{x}+{y}")
-            win.attributes("-topmost", True)
+        def _body(win):
             ctk.CTkLabel(win, text=text, font=self.font_small, fg_color=("gray85", "gray20"),
-                        corner_radius=6, padx=10, pady=8, wraplength=wraplength, justify="left").pack()
-            # Safety net so the popup can never get stuck open: leaving
-            # the popup window itself also closes it, on top of leaving
-            # the "?" icon doing the same - covers the edge case of the
-            # mouse trajectory briefly crossing into the popup's own
-            # small gap area, per "ensure they go away when the pointer
-            # is not on them" applying to ALL question-mark tooltips,
-            # not just the common case of leaving the icon directly.
-            win.bind("<Leave>", lambda e: close_tip())
-            tip["win"] = win
+                        corner_radius=6, padx=10, pady=8, wraplength=wraplength,
+                        justify="left").pack()
 
-        def close_tip():
-            if tip["win"] is not None:
-                tip["win"].destroy()
-                tip["win"] = None
+        open_tip, close_tip, tip, guarded_close = self._make_hint_popup(hint, _body)
 
         def toggle_tip(_event=None):
             close_tip() if tip["win"] is not None else open_tip()
+            return "break"  # don't let the click bubble to the app-wide close-all
 
         hint.bind("<Enter>", lambda e: open_tip())
-        hint.bind("<Leave>", lambda e: close_tip())
+        hint.bind("<Leave>", guarded_close)
         hint.bind("<Button-1>", toggle_tip)
         hint._hint_test_hooks = (open_tip, close_tip, toggle_tip, tip)  # exposed purely for direct testing
         return hint
@@ -1150,28 +1253,14 @@ class App(ctk.CTk):
     def _add_tooltip(self, widget, text):
         """A minimal hover tooltip - just enough to show a full name when
         the button itself is showing a truncated version."""
-        tip = {"win": None}
 
-        def show(_event=None):
-            if tip["win"] is not None:
-                return
-            x = widget.winfo_rootx() + 10
-            y = widget.winfo_rooty() + widget.winfo_height() + 4
-            win = ctk.CTkToplevel(widget)
-            win.overrideredirect(True)
-            win.geometry(f"+{x}+{y}")
-            win.attributes("-topmost", True)
+        def _body(win):
             ctk.CTkLabel(win, text=text, font=self.font_small, fg_color=("gray85", "gray20"),
                         corner_radius=4, padx=8, pady=4).pack()
-            tip["win"] = win
 
-        def hide(_event=None):
-            if tip["win"] is not None:
-                tip["win"].destroy()
-                tip["win"] = None
-
-        widget.bind("<Enter>", show)
-        widget.bind("<Leave>", hide)
+        show, _hide, _state, guarded_close = self._make_hint_popup(widget, _body, x_offset=10)
+        widget.bind("<Enter>", lambda e: show())
+        widget.bind("<Leave>", guarded_close)
 
     def _clear_thumbnail(self):
         if self.thumbnail_image is None:
@@ -1606,6 +1695,7 @@ class App(ctk.CTk):
         tab, which is all that was ever actually needed."""
         from gui.scrollable_dropdown import ScrollableDropdown
         ScrollableDropdown.close_all()
+        self._close_all_hint_popups()
         if not hasattr(self, "mini_progress_bar"):
             return
         # The progress bar itself is left alone entirely now (always
