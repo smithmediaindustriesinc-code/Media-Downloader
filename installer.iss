@@ -16,7 +16,7 @@
 ; so writing there would fail with a permissions error.
 
 #define MyAppName "Media Downloader"
-#define MyAppVersion "1.6.5"
+#define MyAppVersion "1.6.6"
 #define MyAppPublisher "Smith Media Industries inc."
 #define MyAppExeName "MediaDownloader.exe"
 #define MyDistFolder "MediaDownloader"

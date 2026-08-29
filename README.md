@@ -106,6 +106,13 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.6
+
+- Each row in the **History** tab now has its own **Delete** button, so you can
+  remove a single entry without selecting it first or clearing the whole list.
+  It only removes the history record — the downloaded file is left alone — and
+  asks for confirmation first.
+
 ### 1.6.5
 
 - **VLC integration is back.** "Open in VLC" buttons return alongside "Open

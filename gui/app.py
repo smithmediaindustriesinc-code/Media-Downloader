@@ -3302,7 +3302,24 @@ class App(*_APP_BASES):
                 row=0, column=col + 2, rowspan=2, padx=(0, 6))
             ctk.CTkButton(row, text="VLC", width=45, font=self.font_small, **VLC_BUTTON_COLORS,
                           command=lambda p=path: self._open_in_vlc_or_warn(p)).grid(
-                row=0, column=col + 3, rowspan=2, padx=(0, 10))
+                row=0, column=col + 3, rowspan=2, padx=(0, 6))
+            ctk.CTkButton(row, text="Delete", width=60, font=self.font_small,
+                          fg_color="#a13333", hover_color="#7d2626",
+                          command=lambda eid=entry.get("id"), nm=entry.get("name", ""):
+                              self._delete_history_entry_clicked(eid, nm)).grid(
+                row=0, column=col + 4, rowspan=2, padx=(0, 10))
+
+    def _delete_history_entry_clicked(self, entry_id, name):
+        """Per-row delete for a single History entry - removes just that
+        record (not the downloaded file). Confirms first, like Clear
+        History does."""
+        if entry_id is None:
+            return
+        label = f'"{name}"' if name else "this entry"
+        if messagebox.askyesno("Delete history entry",
+                               f"Remove {label} from the download history?\n\n"
+                               "This only removes the history record - the downloaded file is left alone."):
+            self._delete_history_entry(entry_id)
 
     def _open_or_warn(self, folder):
         if not open_folder(folder):
