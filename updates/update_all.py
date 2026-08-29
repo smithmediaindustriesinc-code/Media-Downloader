@@ -12,7 +12,10 @@ def run():
         elif item["kind"] == "ffmpeg":
             ok, msg = deps.install_ffmpeg(progress_callback=print)
         elif item["kind"] == "vlc":
-            ok, msg = deps.install_vlc(progress_callback=print)
+            # VLC is detection-only - never auto-installed by this app.
+            vlc_ok, vlc_path = deps.check_vlc()
+            ok, msg = vlc_ok, (f"detected at {vlc_path}" if vlc_ok
+                               else "not installed (optional - get it from videolan.org)")
         else:
             ok, msg = False, "Unknown dependency."
         summary.append((item["name"], ok, msg))

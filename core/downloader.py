@@ -176,61 +176,131 @@ def fetch_title(url):
 
 
 class PlaylistFetchTimeout(Exception):
-    """Raised when looking up a playlist's info takes longer than the
-    configured timeout (Settings > Advanced, default 60s). This exists
-    because extract_info() is a plain blocking call with no reliable way
-    to bound it from the options dict alone - yt-dlp's own socket_timeout
-    option covers individual network reads, but not every way a lookup
-    can actually hang (DNS resolution stalls, an extractor stuck in a
-    retry loop, etc - the same class of problem the network status
-    checker hit earlier). Enforced from the outside via a worker thread
-    instead, which is a hard guarantee regardless of what's hanging."""
+    """Raised when a playlist lookup makes no progress within the per-window
+    timeout - genuinely hung, not just large. See fetch_playlist_info."""
     pass
 
 
-def fetch_playlist_info(url, timeout_seconds=60):
-    """Look up a playlist's own title plus its entries' titles/URLs,
-    without downloading anything. Used to name the auto-created playlist
-    when 'Download playlist' is on: the playlist's own title if yt-dlp
-    reports one, otherwise the first entry's title.
-    Raises DownloadStageError('playlist info fetch', ...) on a normal
-    failure, or PlaylistFetchTimeout if it hangs past timeout_seconds."""
+class PlaylistFetchCancelled(Exception):
+    """Raised when the caller's cancel_event is set during a playlist lookup
+    (e.g. the Cancel button) - distinct from a timeout so the GUI doesn't
+    show a scary 'timed out' error for a deliberate cancel."""
+    pass
+
+
+_PLAYLIST_WINDOW = 300        # entries fetched per bounded extract_info call
+_PLAYLIST_MAX_WINDOWS = 2000  # sanity cap (~600k entries) against a runaway paginator
+
+
+def _coerce_timeout(value, default=60):
+    try:
+        return max(15, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
+    """Look up a playlist's own title plus its entries' titles/URLs, without
+    downloading anything. Used to name the auto-created playlist when
+    'Download playlist' is on and to get the list of entry URLs to fetch.
+
+    Enumerates the playlist in BOUNDED WINDOWS (_PLAYLIST_WINDOW entries per
+    yt-dlp call via `playlist_items`), in a worker thread that pushes each
+    entry onto a queue as its window resolves. `timeout_seconds` is applied
+    per window (no new progress for that long -> treated as hung), not as a
+    total budget, so a playlist with tens of thousands of entries that keeps
+    making progress runs to completion. If some entries were collected and
+    then it stalls, that partial list is returned rather than failing.
+
+    cancel_event: optional threading.Event; when set, enumeration stops
+    within ~1s and PlaylistFetchCancelled is raised.
+
+    Raises: PlaylistFetchCancelled on cancel; PlaylistFetchTimeout if a
+    window makes no progress in time and nothing was collected;
+    DownloadStageError('playlist info fetch', ...) on a hard extractor
+    failure with no partial results."""
+    window_timeout = _coerce_timeout(timeout_seconds)
     result_queue = queue.Queue()
+    internal_stop = threading.Event()  # main thread -> worker: stop now
+
+    def cancelled():
+        return internal_stop.is_set() or (cancel_event is not None and cancel_event.is_set())
 
     def worker():
-        options = {"quiet": True, "no_warnings": True, "skip_download": True,
-                   "extract_flat": "in_playlist", "noplaylist": False, "socket_timeout": timeout_seconds}
-        options.update(_ffmpeg_options())
+        base = {"quiet": True, "no_warnings": True, "skip_download": True,
+                "extract_flat": "in_playlist", "noplaylist": False,
+                "ignoreerrors": True,
+                "socket_timeout": max(15, min(window_timeout, 60))}
+        base.update(_ffmpeg_options())
         try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=False)
-            result_queue.put(("ok", info))
+            start, sent_meta = 1, False
+            for _ in range(_PLAYLIST_MAX_WINDOWS):
+                if cancelled():
+                    break
+                opts = dict(base, playlist_items=f"{start}:{start + _PLAYLIST_WINDOW - 1}")
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info is None:
+                        if not sent_meta:
+                            result_queue.put(("error", ValueError(
+                                "This URL didn't return any playlist data.")))
+                            return
+                        break
+                    if not sent_meta:
+                        result_queue.put(("meta", {k: info.get(k)
+                                                   for k in ("title", "id", "webpage_url")}))
+                        sent_meta = True
+                    window = [e for e in (info.get("entries") or []) if e]
+                for entry in window:
+                    if cancelled():
+                        break
+                    result_queue.put(("entry", entry))
+                if len(window) < _PLAYLIST_WINDOW or cancelled():
+                    break
+                start += _PLAYLIST_WINDOW
+            result_queue.put(("done", None))
         except Exception as e:
             result_queue.put(("error", e))
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
-    thread.join(timeout=timeout_seconds)
 
-    if thread.is_alive():
-        # The worker thread is left running in the background (daemon,
-        # so it won't block app exit) - Python has no safe way to force-
-        # kill a thread. It'll finish eventually and its result just gets
-        # discarded via result_queue never being read again.
-        raise PlaylistFetchTimeout(
-            f"Looking up this playlist took longer than {timeout_seconds}s and was treated as hung. "
-            f"You can raise this timeout in Settings > Advanced if this playlist is just genuinely large."
-        )
+    meta, collected = {}, []
+    last_progress = time.monotonic()
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            internal_stop.set()
+            raise PlaylistFetchCancelled("Playlist lookup was cancelled.")
+        try:
+            kind, payload = result_queue.get(timeout=1.0)
+        except queue.Empty:
+            if time.monotonic() - last_progress > window_timeout:
+                internal_stop.set()  # abandon the worker (can't force-kill a thread)
+                if not collected and not meta:
+                    raise PlaylistFetchTimeout(
+                        f"This playlist made no progress for {window_timeout}s and was treated "
+                        f"as hung. Raise the timeout in Settings > Advanced if it's just very slow.")
+                break  # partial results
+            continue
+        last_progress = time.monotonic()
+        if kind == "meta":
+            meta = payload or {}
+        elif kind == "entry":
+            collected.append(payload)
+        elif kind == "done":
+            break
+        elif kind == "error":
+            if not collected:
+                raise DownloadStageError("playlist info fetch", payload)
+            break  # partial results are still useful
 
-    status, payload = result_queue.get()
-    if status == "error":
-        raise DownloadStageError("playlist info fetch", payload)
-    info = payload
+    if cancel_event is not None and cancel_event.is_set():
+        raise PlaylistFetchCancelled("Playlist lookup was cancelled.")
 
-    entries = info.get("entries") or []
-    entry_list = [{"title": e.get("title") or "Untitled", "url": e.get("url") or e.get("webpage_url") or url}
-                  for e in entries]
-    playlist_title = info.get("title")
+    entry_list = [{"title": (e.get("title") or "Untitled"),
+                   "url": (e.get("url") or e.get("webpage_url") or url)}
+                  for e in collected if e]
+    playlist_title = meta.get("title")
     if not playlist_title and entry_list:
         playlist_title = entry_list[0]["title"]
     if not playlist_title:
@@ -325,6 +395,99 @@ def _format_for_aspect_ratio(url, quality_key, aspect_key, info=None):
     return f"{chosen['format_id']}+bestaudio/best"
 
 
+def _estimate_bytes_from_info(info):
+    """Given a PROCESSED yt-dlp info dict (format selection already applied,
+    so it carries requested_downloads / requested_formats), return the best
+    available byte estimate for what would actually be written to disk -
+    summing separate video+audio streams when the chosen format is a merge.
+    Returns an int, or None when nothing usable is present."""
+    if not info:
+        return None
+
+    def _one(f):
+        f = f or {}
+        return f.get("filesize") or f.get("filesize_approx")
+
+    downloads = info.get("requested_downloads")
+    if downloads:
+        total, seen = 0, False
+        for d in downloads:
+            subs = d.get("requested_formats")
+            if subs:
+                for s in subs:
+                    v = _one(s)
+                    if v:
+                        total += v
+                        seen = True
+            else:
+                v = _one(d)
+                if v:
+                    total += v
+                    seen = True
+        if seen:
+            return int(total)
+
+    reqf = info.get("requested_formats")
+    if reqf:
+        total, seen = 0, False
+        for s in reqf:
+            v = _one(s)
+            if v:
+                total += v
+                seen = True
+        if seen:
+            return int(total)
+
+    v = _one(info)
+    return int(v) if v else None
+
+
+def fetch_download_size(url, dtype="Video", quality_key="Best", fmt="mp4",
+                        aspect_ratio="Any", cookies_from_browser="none"):
+    """Best-effort estimate, in bytes, of what a REAL download of `url` at the
+    current settings would pull down - used by the optional batch "pre-fetch
+    file sizes" stage so the queue/item ETAs can be size-based rather than
+    item-count-based.
+
+    Uses the SAME format selector the real download would use (bestaudio/best
+    for audio; _format_for_aspect_ratio()'s pick for video, so an explicit
+    aspect ratio is honoured), runs yt-dlp with skip_download/simulate and
+    nothing written, and reads the resolved format's filesize /
+    filesize_approx (summing video+audio when they're separate streams).
+
+    Fast-ish (one extraction, or two only when a non-"Any" aspect ratio
+    forces a format-list lookup) and NEVER raises - returns None on any
+    failure or when the size genuinely isn't known."""
+    try:
+        options = {
+            "quiet": True, "no_warnings": True, "skip_download": True,
+            "simulate": True, "noplaylist": True, "noprogress": True,
+            # Bound a hung extractor so a batch pre-fetch pass (and the
+            # Cancel that only gets polled between items) can't stall forever.
+            "socket_timeout": 15,
+        }
+        options.update(_ffmpeg_options())
+        options.update(_cookie_options(cookies_from_browser))
+
+        if dtype == "Audio":
+            fmt_selector = "bestaudio/best"
+        else:
+            try:
+                fmt_selector = _format_for_aspect_ratio(url, quality_key, aspect_ratio)
+            except Exception:
+                fmt_selector = VIDEO_QUALITY_MAP.get(quality_key, VIDEO_QUALITY_MAP["Best"])
+        options["format"] = fmt_selector
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if info and info.get("entries"):
+            entries = [e for e in info["entries"] if e]
+            info = entries[0] if entries else None
+        return _estimate_bytes_from_info(info)
+    except Exception:
+        return None
+
+
 def _cleanup_stray_part_files(out_dir, name, final_path):
     """After a SUCCESSFUL download, removes any leftover .part/.ytdl
     fragment files - a real, confirmed gap in yt-dlp's own cleanup,
@@ -353,6 +516,14 @@ class Downloader:
         self.item_start_time = None    # set when a single URL's download begins
         self.last_speed = None         # bytes/sec, from the most recent hook call (raw, unsmoothed)
         self.last_eta_seconds = None
+        self.last_total_bytes = None       # CURRENT STREAM's total size (bytes), from the most recent hook call
+        self.last_downloaded_bytes = 0     # CURRENT STREAM's bytes fetched so far, from the most recent hook call
+        # A merged video+audio download is two separate streams, each with
+        # its own hook sequence that resets downloaded_bytes to 0. This
+        # accumulates the finished streams' sizes so item_bytes_done() gives
+        # the whole item's progress (used for the size-based QUEUE ETA -
+        # the per-item ETA still uses the per-stream last_* values).
+        self._item_prev_streams_bytes = 0
         # ping_ms_provider: an optional zero-arg callable returning the
         # app's most recently measured connection latency (see
         # core/network_status.py) - used to scale the speed tracker's
@@ -373,6 +544,12 @@ class Downloader:
             return 0.0
         return time.time() - self.item_start_time
 
+    def item_bytes_done(self):
+        """Whole current item's bytes fetched so far, across all of its
+        streams (video + audio counted together) - for the size-based
+        whole-queue ETA."""
+        return self._item_prev_streams_bytes + (self.last_downloaded_bytes or 0)
+
     def _hook(self, d):
         if self._cancel:
             raise DownloadCancelled("Download cancelled by user.")
@@ -383,6 +560,8 @@ class Downloader:
             self.speed_tracker.add_sample(speed, ping_ms=ping)
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             downloaded = d.get("downloaded_bytes", 0)
+            self.last_total_bytes = total
+            self.last_downloaded_bytes = downloaded
             pct = (downloaded / total) if total else 0
             # ETA from the SMOOTHED 5-second-average speed, not the raw
             # instant reading - a single jittery hook call shouldn't
@@ -400,6 +579,13 @@ class Downloader:
             if self.progress_callback:
                 self.progress_callback(pct, speed)
         elif d.get("status") == "finished":
+            # One stream (of possibly two) done - roll its size into the
+            # cumulative item total and reset the per-stream counters so the
+            # next stream's hooks start from zero.
+            self._item_prev_streams_bytes += max(self.last_total_bytes or 0,
+                                                  self.last_downloaded_bytes or 0)
+            self.last_total_bytes = None
+            self.last_downloaded_bytes = 0
             self._log("Download finished, post-processing / merging...")
 
     def download_video(self, url, name, out_dir, quality_key, fmt,
@@ -410,6 +596,9 @@ class Downloader:
         self.last_speed = None
         self.speed_tracker.reset()
         self.last_eta_seconds = None
+        self.last_total_bytes = None
+        self.last_downloaded_bytes = 0
+        self._item_prev_streams_bytes = 0
         os_safe_dir = out_dir.rstrip("/\\")
         outtmpl = f"{os_safe_dir}/{name}.%(ext)s"
 
@@ -474,6 +663,9 @@ class Downloader:
         self.last_speed = None
         self.speed_tracker.reset()
         self.last_eta_seconds = None
+        self.last_total_bytes = None
+        self.last_downloaded_bytes = 0
+        self._item_prev_streams_bytes = 0
         os_safe_dir = out_dir.rstrip("/\\")
         outtmpl = f"{os_safe_dir}/{name}.%(ext)s"
         postprocessors = [{

@@ -20,3 +20,7 @@ options/dev_access.json
 options/draft_state.json
 options/pending_import.json
 history/
+ffmpeg/
+playwright-browsers/
+vlc_setup_temp.exe
+*.log

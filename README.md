@@ -2,7 +2,7 @@
 
 A customtkinter GUI for `yt-dlp`, built for someone who downloads media
 constantly - single-window, tabbed, with playlists, history, dependency
-auto-install, and VLC integration.
+auto-install, and "Open in VLC" shortcuts.
 
 ## Setup (running from source)
 
@@ -15,10 +15,10 @@ auto-install, and VLC integration.
    ```
    python main.py
    ```
-FFmpeg and VLC do NOT need to be pre-installed - the app detects them on
-first launch and lets you install both with one click from the **Version**
+FFmpeg does NOT need to be pre-installed - the app detects it on
+first launch and lets you install it with one click from the **Version**
 tab (no admin rights needed; FFmpeg is dropped straight into the app's own
-folder, VLC uses its official silent installer).
+folder).
 
 On first launch you'll be asked to pick a default download folder - the
 app creates `Videos/` and `Music/` subfolders inside it automatically.
@@ -43,9 +43,9 @@ VideoDownloaderApp/
 │   ├── config.py                   # settings storage
 │   ├── history.py                  # download history storage
 │   ├── playlists.py                 # playlist storage
-│   ├── dependencies.py              # check/install ffmpeg, vlc, pip pkgs
+│   ├── dependencies.py              # check/install ffmpeg + pip pkgs, detect VLC
 │   ├── downloader.py                 # yt-dlp wrapper
-│   └── utils.py                       # file moves, VLC launch, sanitizing
+│   └── utils.py                       # file moves, folder/file/VLC opening, sanitizing
 ├── gui/
 │   ├── app.py                         # the whole window (5 tabs)
 │   ├── scrollable_dropdown.py          # custom scrollable dropdown widget
@@ -53,7 +53,6 @@ VideoDownloaderApp/
 └── updates/                              # one script per dependency
     ├── update_ytdlp.py
     ├── update_ffmpeg.py
-    ├── update_vlc.py
     ├── update_customtkinter.py
     ├── update_pillow.py
     └── update_all.py
@@ -63,19 +62,19 @@ VideoDownloaderApp/
 
 - **Download** - single download or a batch queue (paste many URLs, each
   auto-named from its title). Aspect ratio, quality, format, playlist and
-  subtitle options, thumbnail preview, "Open in VLC" shortcut, per-field
-  clear buttons, and a Clear Log button.
+  subtitle options, thumbnail preview, per-field clear buttons, and a Clear
+  Log button.
 - **Playlists** - Spotify-style: create a named playlist, add any finished
-  download to it, browse/remove tracks, open a track in VLC.
+  download to it, browse/remove tracks, and open a track with your OS's default app.
 - **History** - every download attempt (success, failed, or cancelled)
-  with the reason it failed if it did, plus one-click "open folder" / VLC.
+  with the reason it failed if it did, plus one-click folder/file opening.
 - **Settings** - change your default download folder (with a prompt to
   move existing files, Select All included), video/audio defaults,
   clipboard auto-detect, theme, color, font family/size, and a bold-text
   accessibility toggle.
 - **Version** - live status of every dependency (yt-dlp, customtkinter,
-  Pillow, FFmpeg, VLC) with per-item Install/Update buttons and one
-  "Update All" button.
+  Pillow, FFmpeg) with per-item Install/Update buttons and one "Update All"
+  button.
 
 ## Turning this into a real Windows app
 
@@ -97,9 +96,6 @@ VideoDownloaderApp/
 - Aspect-ratio filtering picks the closest matching format yt-dlp reports
   for that video rather than a guaranteed exact crop - most sources don't
   offer every ratio for every video.
-- Silent VLC installs can be blocked by some locked-down/managed Windows
-  machines; if that happens the installer window opens for you to click
-  through manually instead of failing silently.
 - Playlists here are lightweight (named lists of file paths you build up
   yourself) rather than a full drag-and-drop reorder UI.
 - DRM-protected sources (Spotify, Disney+, Hulu, Peacock, etc.) are not
@@ -109,6 +105,162 @@ See **Update Helper.txt** for a full walkthrough of how the code is
 organized and how to change or add features yourself.
 
 ## Changelog
+
+### 1.6.10
+
+- **Update Media Downloader from inside the app.** The Version tab now lists
+  "Media Downloader" itself at the top, with an **Update** button in the same
+  place as the dependency Update buttons. It checks the release list, and when
+  a newer version is out it downloads that installer, launches it, and closes
+  the app so it can be replaced. A small **Beta** checkbox (off by default)
+  makes the check also offer preview builds. **Update All** now includes the
+  app update (run last, since it closes the app).
+
+### 1.6.9
+
+- **"View a request" is now an in-app page, not a pop-up.** Clicking **View**
+  on a request in **History → Request History** no longer opens a separate
+  modal window — it swaps the request list out for the request's detail page
+  in place, with a **← Back** button at the top (Escape also goes back). All
+  the same controls are there: the editable title, the "Select multiple"
+  toolbar with Copy/Retry Selected, and the per-URL Copy Link / Retry /
+  Redownload buttons.
+- **Renaming a request no longer flashes the screen.** The Rename/Save
+  toggle updates the title in place instead of tearing down and rebuilding
+  the whole view.
+- **Faster request detail view.** Re-renders (a retry finishing, toggling a
+  checkbox) now only rebuild the rows that actually changed instead of every
+  row, the refresh is debounced, file sizes are read with a single stat call,
+  and the multi-select toolbar is reused across renders.
+
+### 1.6.8
+
+- **Optional "pre-fetch file sizes" stage for batches.** New toggle in
+  **Settings → Advanced → Batch Queue** ("Pre-fetch file sizes before a
+  batch"), off by default. When on, a batch or full-playlist download first
+  does a quick pass that fetches only each item's download size — nothing is
+  downloaded yet — showing "Pre-fetching file sizes… 3/20" in the log.
+- **Size-based ETAs.** When the pre-fetch data is available, the whole-queue
+  "time remaining" is now *(total remaining bytes ÷ current average download
+  speed)* rather than *(items left × average time per item)*, and the same
+  bytes-remaining ÷ speed math drives the single-item ETA. If some items had
+  no known size, the queue ETA is shown as a lower bound. With the toggle off,
+  ETAs behave exactly as before.
+
+### 1.6.7
+
+- **Redownload a successful item.** In a request's detail view, a successful
+  item now has a **Redownload** button (was a disabled "Retry") — handy when
+  you've deleted the file. It fetches again into the request's original folder.
+- **Retry only one request's failures.** Each request row with failed items now
+  has its own **"Retry failed (N)"** button, separate from the global Retry All.
+- When retrying, the queue counter now **resumes from where the request left
+  off** — a 20-item request with 6 already done shows "Retry 7/20" onward, not
+  "Retry 1/14".
+
+### 1.6.6
+
+- Each row in the **History** tab now has its own **Delete** button, so you can
+  remove a single entry without selecting it first or clearing the whole list.
+  It only removes the history record — the downloaded file is left alone — and
+  asks for confirmation first.
+
+### 1.6.5
+
+- **VLC integration is back.** "Open in VLC" buttons return alongside "Open
+  file" — on History rows, the Playlists track list, the Media Library results,
+  and the Download tab's output row. "Open file" still opens with your OS's
+  default app; the VLC button launches VLC directly.
+- The **Version** tab now shows whether VLC is installed (detected via PATH,
+  the standard install folders, or the VideoLAN registry key). When it's
+  missing it offers a **"Get VLC"** button that opens the videolan.org download
+  page (or the Microsoft Store listing) — the app no longer downloads or
+  installs VLC automatically.
+- If VLC isn't installed, the "Open in VLC" buttons warn gracefully with a
+  link to get it rather than doing nothing.
+
+### 1.6.4
+
+- New **"Save to Requests / History"** toggle on the Download tab. When it's
+  off, a download runs normally but is not recorded to Request History or the
+  History tab. On by default.
+
+### 1.6.3
+
+- The **Batch Queue** dynamic URL list now shows a live count of what's queued
+  ("3 URLs") as you add URLs — one at a time, pasted in bulk, or dropped in —
+  and as you remove, undo, or clear them, before you press Start Queue.
+
+### 1.6.2
+
+- Developer-unlock credentials rotated and stored as a salted PBKDF2 hash instead of plaintext.
+- The one-line log echo shown at the top on non-Download tabs now mirrors the
+  **bottom line of the visible log exactly** — same text and colour, and it
+  respects the current log mode and the log-enabled toggle (it no longer shows
+  lines that were filtered out of the log itself).
+
+### 1.6.1
+
+- **Drag a video thumbnail straight onto the window.** Drag a thumbnail (or a
+  link) from your browser — e.g. a video on the YouTube home page — and drop it
+  anywhere on Media Downloader. It pulls the real video URL out of the drop,
+  puts it in the URL box, and then:
+  - on the **Single Download** tab, starts the download immediately;
+  - on the **Batch Queue** tab, adds the URL to the list (plain textbox or the
+    dynamic URL list, whichever mode is on) without starting;
+  - dropped on any other tab, fills the Single Download URL box and waits.
+  Needs the `tkinterdnd2` package; if it isn't installed the app runs exactly
+  as before, just without this feature.
+
+### 1.6.0 (in development)
+
+- **Huge playlists no longer time out.** The playlist-info lookup now streams
+  entries in and only gives up if nothing arrives for a while, instead of a
+  fixed 60-second cap - a playlist with tens of thousands of entries can
+  finish. The Cancel button also aborts a slow lookup now.
+- The FFmpeg location is looked up once and cached (was re-scanned on every
+  metadata fetch and every download).
+- Settings files now carry a schema version with explicit, numbered
+  migrations for future changes.
+
+### 1.5.4
+
+Bug fixes:
+- **URL Scraping "browser component" install loop.** The Playwright/Chromium
+  install could fail silently and leave the app re-prompting the same popup
+  forever (and a manual `playwright install` was invisible to it). Chromium
+  now installs to, and loads from, a per-user app-owned folder
+  (`%APPDATA%\Media Downloader\playwright-browsers`), the install runs with a
+  hidden console and its result is verified before the app reports success,
+  and a still-missing browser shows a plain error instead of looping.
+- **"Remember maximized" now works.** Closing while maximized is remembered
+  and a "Remembered" launch restores a true maximized window (it used to
+  reopen as a plain floating window at maximized size).
+- **"Select multiple" toolbar spacing.** The multi-select toolbar (on
+  Playlists, History, Library, URL Scraping) no longer inflates its row to
+  ~200px and leaves the toggle floating in a big gap while selection is off.
+- URL Scraping shows its "No results yet" placeholder from first render.
+
+Appearance / behavior:
+- Removed the VLC integration - the app no longer bundles/installs VLC or has
+  "Open in VLC" buttons. Files now open with your OS's default app for that
+  file type (video, audio, or anything else), directly from History, Playlists
+  and the Library.
+- Launches maximized by default; any non-maximized launch is centered on
+  screen.
+- The startup logo animation now loops (grow → hold → shrink → hold → repeat).
+- "URL Scraping" is the first and default sub-tab of the More tab.
+- The dynamic batch-queue URL input is on by default.
+- Enter now triggers the adjacent action for text+button fields that aren't
+  downloads (Fetch info, Scrape, dev login, the search boxes).
+- The default download folder is automatically a Media Library folder.
+- The Media Library search box no longer squishes the controls beside it.
+
+Build:
+- `build_exe.bat` is now double-click-safe (runs from its own folder,
+  auto-detects Python, bundles the customtkinter themes + the Playwright
+  package). `installer.iss` warnings cleared; the post-install browser
+  download runs as the real user.
 
 ### 1.5.3
 

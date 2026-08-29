@@ -10,6 +10,7 @@ import threading
 import time
 import datetime
 import urllib.request
+import webbrowser
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -23,19 +24,21 @@ ctk.deactivate_automatic_dpi_awareness()
 
 from core.config import load_config, save_config
 from core.downloader import (Downloader, DownloadCancelled, DownloadStageError, YouTubeBotDetectedError,
-                              CookieAccessError, PlaylistFetchTimeout,
-                              fetch_info, fetch_media_info, fetch_playlist_info, cleanup_partial_files, download_with_retry,
+                              CookieAccessError, PlaylistFetchTimeout, PlaylistFetchCancelled,
+                              fetch_info, fetch_media_info, fetch_playlist_info, fetch_download_size,
+                              cleanup_partial_files, download_with_retry,
                               MAX_DOWNLOAD_ATTEMPTS,
                               VIDEO_QUALITIES, VIDEO_FORMATS, AUDIO_FORMATS, AUDIO_QUALITIES,
                               ASPECT_RATIO_OPTIONS)
 from core.error_popup import show_error
 from core.download_requests import (start_request, update_item, finish_request, add_item_to_request,
                                      reopen_for_retry, get_all_requests, get_request, delete_request,
-                                     find_previous_download)
-from core.utils import (open_folder, open_file, open_in_vlc, open_media_smart, make_unique_name, sanitize_filename,
-                         beautify_title, weighted_match_score, strip_leading_special,
+                                     find_previous_download, set_recording as _set_requests_recording)
+from core.utils import (open_folder, open_file, open_in_vlc, open_media_smart, make_unique_name,
+                         sanitize_filename, beautify_title, weighted_match_score, strip_leading_special,
                          list_files, move_files, format_file_size)
-from core.history import load_history, add_entry, update_entry, clear_history, delete_entry
+from core.history import (load_history, add_entry, update_entry, clear_history, delete_entry,
+                          set_recording as _set_history_recording)
 from core.playlists import (list_playlists, create_playlist, delete_playlist, playlist_path,
                              playlist_contents, add_file_to_playlist, remove_file_from_playlist,
                              ensure_playlists_root, import_folder_as_playlist)
@@ -46,10 +49,41 @@ from gui.dialogs import MoveFilesDialog, NewPlaylistDialog
 from gui.request_history import build_request_history_section
 from gui.sidebar_tabview import SidebarTabview
 from core.dev_access import check_credentials as check_dev_credentials, grant_access as grant_dev_access
+from core.drag_drop import extract_video_url
+
+# --- optional: external drag-and-drop (drag a video thumbnail from a
+# browser onto the window -> its URL). Tkinter has no native external DnD;
+# tkinterdnd2 bundles the tkdnd Tcl binaries. The whole app MUST still run
+# if this package is absent (a source checkout or frozen build without it),
+# so the import is optional and every use is guarded by self._dnd_ok.
+try:
+    from tkinterdnd2 import TkinterDnD as _TkinterDnD
+    from tkinterdnd2 import DND_TEXT as _DND_TEXT, COPY as _DND_COPY
+    from tkinterdnd2.TkinterDnD import DnDWrapper as _DnDWrapper
+    # DnDWrapper is a mixin whose methods (drop_target_register, dnd_bind,
+    # ...) live on tkinter.BaseWidget - but the Tk ROOT is not a BaseWidget,
+    # so the CTk root only gets them by inheriting the mixin directly.
+    _APP_BASES = (ctk.CTk, _DnDWrapper)
+except Exception:  # pragma: no cover - exercised only where the dep is missing
+    _TkinterDnD = None
+    _DND_TEXT = "DND_Text"
+    _DND_COPY = "copy"
+    _APP_BASES = (ctk.CTk,)
+
+# Platform-independent tkdnd type names. On Windows tkdnd only recognizes real
+# clipboard-format names (CF_UNICODETEXT, CF_HTML, UniformResourceLocator, ...);
+# the X11 names "text/uri-list" / "text/html" pass through as dead strings that
+# never match, so a dragged *image* (which Chrome/Edge offer as CF_HTML +
+# UniformResourceLocator, often with no CF_UNICODETEXT) would be refused before
+# <<Drop>> ever fires. DND_URL first so tkdnd prefers the link target.
+_DND_URL = "DND_URL"     # -> UniformResourceLocator(W)
+_DND_HTML = "DND_HTML"   # -> CF_HTML, {HTML Format}
+_DND_DROP_TYPES = (_DND_URL, _DND_HTML, _DND_TEXT)
 
 URL_PATTERN = re.compile(r"https?://\S+")
-# DEV_USERNAME / DEV_PASSWORD now live in core/dev_access.py, which also
-# handles any additionally-granted developer accounts - see check_dev_credentials.
+# The built-in developer login and any additionally-granted accounts live in
+# core/dev_access.py. The password is stored there as a salted PBKDF2 hash
+# (not plaintext) - see check_dev_credentials / grant_dev_access.
 FONT_FAMILIES = ["Segoe UI", "Arial", "Calibri", "Verdana", "Tahoma", "Consolas",
                   "Courier New", "Georgia", "Trebuchet MS", "Comic Sans MS", "Times New Roman"]
 FONT_SIZES = [11, 12, 13, 14, 15, 16, 18, 20, 22, 24]
@@ -75,6 +109,12 @@ COLOR_THEME_LABELS = {v: v.replace("-", " ").title() for v in COLOR_THEMES}
 BUILTIN_COLOR_THEMES = {"blue", "green", "dark-blue", "gold"}
 VLC_BUTTON_COLORS = {"fg_color": "#ff8800", "hover_color": "#cc6d00"}
 
+# VLC download / store pages - opened from the Version tab "Get VLC" button
+# and from the "VLC" warning when VLC isn't installed. The app never
+# downloads or installs VLC itself.
+VLC_DOWNLOAD_PAGE = "https://www.videolan.org/vlc/"
+VLC_STORE_PAGE = "https://apps.microsoft.com/detail/xpdm1179r5zg4l"
+
 
 def apply_color_theme(theme_value):
     """blue/green/dark-blue/gold are customtkinter's own built-in themes -
@@ -94,12 +134,28 @@ def read_disclaimer():
         return "Disclaimer file not found."
 
 
-class App(ctk.CTk):
+class App(*_APP_BASES):
     def __init__(self):
         from core.startup_log import mark
         mark("App.__init__ start (before super().__init__())")
         super().__init__()
         mark("ctk.CTk.__init__ done")
+
+        # Load the tkdnd Tcl extension into THIS interpreter. Kept entirely
+        # optional: if tkinterdnd2 isn't installed (or tkdnd fails to load
+        # on this platform) the app runs exactly as before, just without
+        # thumbnail drag-and-drop. Every drop-target registration later is
+        # guarded by self._dnd_ok.
+        self._dnd_ok = False
+        if _TkinterDnD is not None:
+            try:
+                self.TkdndVersion = _TkinterDnD._require(self)
+                self._dnd_ok = True
+                mark(f"tkinterdnd2 loaded (tkdnd {self.TkdndVersion}); _dnd_ok = True")
+            except Exception as e:
+                mark(f"tkinterdnd2 present but tkdnd load failed (non-fatal): {e}; _dnd_ok = False")
+        else:
+            mark("tkinterdnd2 not installed (non-fatal); _dnd_ok = False")
 
         # Flipped once, in _on_close_requested(), before self.destroy()
         # is called. Every recurring background loop (_start_recurring's
@@ -174,6 +230,15 @@ class App(ctk.CTk):
         self.last_downloaded_path = None
         self._batch_item_durations = []  # completed-item durations, for the whole-queue ETA estimate
         self._batch_items_remaining = 0
+        # Size-based ETA state (populated only when Advanced > "Pre-fetch file
+        # sizes before a batch" is on). _batch_total_bytes == 0 means "not
+        # pre-fetched" and the ETA falls back to the item-count estimate.
+        self._batch_total_bytes = 0
+        self._batch_bytes_done = 0
+        self._batch_size_by_url = {}
+        self._batch_current_url = None
+        self._batch_prefetch_had_unknowns = False
+        self._prefetch_cancel = None
         self.thumbnail_image = None
         # Small thumbnails (~160x90) are cheap enough to just never
         # garbage-collect for the life of the app. This works around a
@@ -223,6 +288,9 @@ class App(ctk.CTk):
         self._start_autosave()
         self._restore_draft_fields()
         self._recover_interrupted_downloads()
+        self._ensure_download_root_in_library()  # A9: download folder is a library folder by default
+        self._apply_recording_state()  # 1.6.4: honour "Save to Requests / History" from the start
+        self._wire_drag_and_drop()  # 1.6.1: drag a video thumbnail from a browser -> URL field
 
     RESOLUTION_PRESETS_BASE = [
         (3840, 2160), (2560, 1440), (1920, 1080), (1600, 900),
@@ -236,7 +304,7 @@ class App(ctk.CTk):
         window couldn't actually be."""
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
-        choices = ["Remembered (last closed size)", "Fullscreen"]
+        choices = ["Fullscreen", "Remembered (last size)"]
         for w, h in self.RESOLUTION_PRESETS_BASE:
             if w <= screen_w and h <= screen_h:
                 choices.append(f"{w}x{h}")
@@ -282,7 +350,8 @@ class App(ctk.CTk):
             self.geometry(f"{screen_w}x{screen_h}+0+0")
             return
 
-        if choice not in ("Remembered", "Remembered (last closed size)") and "x" in choice:
+        if choice not in ("Remembered", "Remembered (last size)", "Remembered (last closed size)") \
+                and "x" in choice:
             try:
                 w, h = (int(p) for p in choice.split("x"))
                 self._center_window(w, h)
@@ -290,14 +359,24 @@ class App(ctk.CTk):
             except ValueError:
                 pass  # fall through to remembered/default below
 
+        # "Remembered": if the window was left maximized, restore a real
+        # maximized state (see _on_close_requested, which saves that flag).
+        # Otherwise re-center at the remembered SIZE - as of 1.6.0 a
+        # non-maximized window is always centered on launch, never reopened
+        # at its exact last on-screen position.
+        if self.cfg.get("window_maximized", False):
+            try:
+                self.state("zoomed")
+                return
+            except Exception:
+                pass
+            try:
+                self.attributes("-zoomed", True)
+                return
+            except Exception:
+                pass
         width = self.cfg.get("window_width", 820)
         height = self.cfg.get("window_height", 720)
-        x = self.cfg.get("window_x")
-        y = self.cfg.get("window_y")
-        if x is not None and y is not None:
-            x, y = self._clamp_to_screen(x, y, width, height)
-            self.geometry(f"{width}x{height}+{x}+{y}")
-            return
         self._center_window(width, height)
 
     def _on_window_configure(self, event):
@@ -458,9 +537,25 @@ class App(ctk.CTk):
         self.cfg["music_path"] = music_path
         self.cfg["playlists_path"] = playlists_path
         save_config(self.cfg)
+        self._ensure_download_root_in_library()
         if hasattr(self, "download_root_label"):
             self.download_root_label.configure(text=chosen)
         return True
+
+    def _ensure_download_root_in_library(self):
+        """A9: the default download folder is a Media Library scan folder
+        by default. Added once at the front of the list; if the user later
+        removes it (see _remove_library_directory), the opt-out flag keeps
+        it from coming back."""
+        root = self.cfg.get("download_root", "")
+        if not root or self.cfg.get("media_library_download_root_optout"):
+            return
+        dirs = self.cfg.setdefault("media_library_directories", [])
+        if root not in dirs:
+            dirs.insert(0, root)
+            save_config(self.cfg)
+            if hasattr(self, "library_dirs_frame") and self.library_dirs_frame.winfo_exists():
+                self._refresh_library_dirs_list()
 
     def _ensure_download_root_for_download(self):
         """Called right before a download starts. Returns True if a valid
@@ -528,6 +623,7 @@ class App(ctk.CTk):
         self.mini_log_label = ctk.CTkLabel(header, text="", font=self.font_small, text_color="gray60", anchor="w")
         self.mini_log_label.grid(row=2, column=0, sticky="w", pady=(2, 0))
         self._last_mini_log_text = ""
+        self._last_mini_log_color = "gray60"
 
         # Save status - always visible (not gated to non-Download tabs
         # like the log echo above it), right below it under the title.
@@ -651,6 +747,15 @@ class App(ctk.CTk):
                                                     font=self.font_normal, width=220)
         self.aspect_dropdown.grid(row=1, column=1, sticky="w", padx=15, pady=(4, 4))
 
+        # When off, this download is not written to Request History or the
+        # History tab (core.download_requests / core.history recording is
+        # switched off for the run). See _on_save_download_info_changed.
+        self.save_info_var = ctk.BooleanVar(value=self.cfg.get("save_download_info", True))
+        self.save_info_switch = ctk.CTkSwitch(
+            shared, text="Save to Requests / History", font=self.font_normal,
+            variable=self.save_info_var, command=self._on_save_download_info_changed)
+        self.save_info_switch.grid(row=1, column=2, columnspan=2, sticky="e", padx=15, pady=(4, 4))
+
         ctk.CTkLabel(shared, text="Output folder (blank = default)", font=self.font_label).grid(
             row=2, column=0, columnspan=4, sticky="w", padx=15, pady=(10, 2))
         out_row = ctk.CTkFrame(shared, fg_color="transparent")
@@ -664,9 +769,12 @@ class App(ctk.CTk):
         ctk.CTkButton(out_row, text="Open folder", width=95, font=self.font_normal,
                       fg_color="gray40", hover_color="gray30",
                       command=self.open_current_output_folder).grid(row=0, column=3, padx=(0, 6))
+        ctk.CTkButton(out_row, text="Open file", width=95, font=self.font_normal,
+                      fg_color="gray40", hover_color="gray30",
+                      command=self.open_output_file).grid(row=0, column=4, padx=(0, 6))
         ctk.CTkButton(out_row, text="Open in VLC", width=95, font=self.font_normal,
                       **VLC_BUTTON_COLORS,
-                      command=self.open_output_in_vlc).grid(row=0, column=4)
+                      command=self.open_output_in_vlc).grid(row=0, column=5)
 
         playlist_out_row = ctk.CTkFrame(shared, fg_color="transparent")
         playlist_out_row.grid(row=4, column=0, columnspan=4, sticky="ew", padx=15, pady=(0, 12))
@@ -796,6 +904,8 @@ class App(ctk.CTk):
         url_row.grid_columnconfigure(0, weight=1)
         self.url_entry = ctk.CTkEntry(url_row, placeholder_text="https://...", font=self.font_normal)
         self.url_entry.grid(row=0, column=0, sticky="ew")
+        # Enter = Fetch info (not a download, so allowed per the 1.6.0 rule).
+        self.url_entry.bind("<Return>", lambda e: self.fetch_info_clicked())
         self._add_clear_button(url_row, self.url_entry, also_clear_thumbnail=True).grid(row=0, column=1, padx=(6, 6))
         ctk.CTkButton(url_row, text="Fetch info", width=100, font=self.font_normal,
                       command=self.fetch_info_clicked).grid(row=0, column=2)
@@ -868,6 +978,12 @@ class App(ctk.CTk):
         self.batch_add_entry.bind("<Return>", lambda e: self._add_batch_urls_from_entry())
         ctk.CTkButton(add_row, text="Add", width=70, font=self.font_normal,
                       command=self._add_batch_urls_from_entry).grid(row=0, column=1)
+        # Live count of what's queued up, before Start Queue is pressed -
+        # updates as URLs are added (one at a time, pasted in bulk, or
+        # dropped in), removed, undone, or cleared. See _refresh_batch_dynamic_list.
+        self.batch_queue_size_label = ctk.CTkLabel(add_row, text="empty", font=self.font_small,
+                                                    text_color="gray60", width=70, anchor="e")
+        self.batch_queue_size_label.grid(row=0, column=2, padx=(8, 0))
 
         undo_row = ctk.CTkFrame(self._batch_dynamic_frame, fg_color="transparent")
         undo_row.grid(row=1, column=0, sticky="w", pady=(0, 6))
@@ -932,6 +1048,23 @@ class App(ctk.CTk):
         save_config(self.cfg)
         self._apply_batch_queue_mode()
 
+    def _apply_recording_state(self):
+        """Push the 'Save to Requests / History' setting into the two
+        recording modules. Called once at startup and whenever the toggle
+        flips."""
+        on = bool(self.cfg.get("save_download_info", True))
+        _set_requests_recording(on)
+        _set_history_recording(on)
+
+    def _on_save_download_info_changed(self):
+        on = bool(self.save_info_var.get())
+        self.cfg["save_download_info"] = on
+        save_config(self.cfg)
+        self._apply_recording_state()
+        self._log("Downloads will be saved to Requests / History."
+                  if on else
+                  "Save download info is OFF - downloads won't be recorded to Requests or History.")
+
     def _clear_batch_queue(self):
         self.batch_box.delete("1.0", "end")
         self._batch_urls = []
@@ -988,6 +1121,123 @@ class App(ctk.CTk):
         self.batch_undo_btn.configure(state="normal" if self._batch_undo_stack else "disabled")
         self.batch_undo_count_label.configure(
             text=f"{len(self._batch_undo_stack)} removed" if self._batch_undo_stack else "")
+        if hasattr(self, "batch_queue_size_label"):
+            n = len(self._batch_urls)
+            self.batch_queue_size_label.configure(
+                text="empty" if n == 0 else ("1 URL" if n == 1 else f"{n} URLs"))
+
+    # ------------------------------------------------------------------
+    # 1.6.1 - drag a video thumbnail from a browser onto the window
+    # ------------------------------------------------------------------
+    def _wire_drag_and_drop(self):
+        """Register the top-level window as a tkdnd drop target so a browser
+        thumbnail/link dropped anywhere on the app routes its URL by the
+        current mode. Only the root is registered: tkdnd's HandlePosition
+        walks from the widget under the cursor up through winfo_parent to the
+        toplevel (tkdnd_generic.tcl), so a single root registration already
+        catches drops over any child - old and new alike - with no per-widget
+        focus-steal and no ~1ms-each startup cost of walking the tree. No-op
+        unless self._dnd_ok."""
+        from core.startup_log import mark
+        if not getattr(self, "_dnd_ok", False):
+            mark("drag-and-drop wiring skipped (_dnd_ok is False)")
+            return
+        ok = False
+        try:
+            self.drop_target_register(*_DND_DROP_TYPES)
+            ok = True
+        except Exception:
+            # Some tkdnd builds reject an unknown name in a multi-type call -
+            # fall back to registering each type on its own.
+            for t in _DND_DROP_TYPES:
+                try:
+                    self.drop_target_register(t)
+                    ok = True
+                except Exception:
+                    pass
+        if ok:
+            try:
+                self.dnd_bind("<<Drop>>", self._on_thumbnail_drop)
+                mark("drag-and-drop wired on the main window")
+            except Exception as e:
+                mark(f"drag-and-drop bind failed (non-fatal): {e}")
+        else:
+            mark("drag-and-drop: no drop types accepted (non-fatal)")
+
+    def _extract_video_url(self, raw):
+        """Thin instance wrapper around core.drag_drop.extract_video_url so
+        it can be monkeypatched/tested against the live app if ever needed."""
+        try:
+            return extract_video_url(raw)
+        except Exception as e:
+            self._log(f"Drag-and-drop: URL parse error ({e}).")
+            return None
+
+    # yt-dlp treats these as "download everything under here" - a drop onto
+    # them should pre-fill but never auto-start without the user confirming.
+    _DND_BULK_URL_RE = re.compile(
+        r"(?:/@[^/?#]+(?:/?$|/(?:videos|streams|shorts|playlists)?/?$)"
+        r"|/channel/|/c/|/user/|[?&]list=)", re.IGNORECASE)
+
+    def _on_thumbnail_drop(self, event):
+        """<<Drop>> handler. tkdnd runs this synchronously inside the OLE
+        IDropTarget::Drop callback (uplevel #0), while the source browser's
+        drag loop is still blocked - so it must return immediately. The real
+        work (which can open modal dialogs / a folder picker / start a
+        download) is punted to the next idle turn."""
+        raw = getattr(event, "data", "") or ""
+        self.after(0, lambda: self._handle_dropped_payload(raw))
+        return _DND_COPY
+
+    def _handle_dropped_payload(self, raw):
+        try:
+            url = self._extract_video_url(raw)
+            if not url:
+                self._log("Drag-and-drop: couldn't find a video URL in what was dropped.")
+                return
+
+            on_download_tab = (getattr(self, "tabview", None) is not None
+                               and self.tabview.get() == "Download")
+            on_batch_tab = (on_download_tab
+                            and getattr(self, "inner_tabview", None) is not None
+                            and self.inner_tabview.get() == "Batch Queue")
+
+            if on_batch_tab and self.cfg.get("dynamic_batch_queue_enabled", False):
+                self._batch_urls.append(url)
+                self._refresh_batch_dynamic_list()
+                self._log(f"Drag-and-drop: added to the dynamic batch queue - {url}")
+            elif on_batch_tab:
+                existing = self.batch_box.get("1.0", "end").rstrip()
+                self.batch_box.delete("1.0", "end")
+                self.batch_box.insert("1.0", (existing + "\n" + url + "\n") if existing else (url + "\n"))
+                self.batch_box.see("end")
+                self._log(f"Drag-and-drop: added to the batch list - {url}")
+            else:
+                # Single Download: switch there, pre-fill the URL. Auto-start
+                # only for a normal single video and only when nothing is
+                # already downloading; a channel/playlist URL or a busy
+                # downloader just pre-fills and waits for the user.
+                try:
+                    self.tabview.set("Download")
+                    self.inner_tabview.set("Single Download")
+                except Exception:
+                    pass
+                self.url_entry.delete(0, "end")
+                self.url_entry.insert(0, url)
+                bulk = bool(self._DND_BULK_URL_RE.search(url))
+                busy = self._single_download_busy()
+                if on_download_tab and not bulk and not busy:
+                    self._log(f"Drag-and-drop: starting download - {url}")
+                    self.start_single_download()
+                else:
+                    self.url_entry.focus_set()
+                    why = ("a download is already running" if busy
+                           else "that looks like a channel/playlist" if bulk
+                           else "dropped from another tab")
+                    self._log(f"Drag-and-drop: URL ready on Single Download ({why}) - "
+                              f"press Download to start - {url}")
+        except Exception as e:
+            self._log(f"Drag-and-drop: could not handle the drop ({e}).")
 
     def _add_clear_button(self, parent, entry_widget, also_clear_thumbnail=False):
         def do_clear():
@@ -1163,6 +1413,7 @@ class App(ctk.CTk):
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
         self._log_entries = []
+        self._sync_mini_log("")  # no bottom line anymore
 
     # ------------------------------------------------------------------ #
     def _on_type_change(self, value):
@@ -1212,19 +1463,25 @@ class App(ctk.CTk):
         if not open_folder(target):
             messagebox.showwarning("Not found", f"Could not open:\n{target}")
 
-    def open_output_in_vlc(self):
-        """Opens the most recently downloaded FILE in VLC if we have one,
-        rather than just the containing folder - previously this always
-        opened the folder, which from the user's perspective just looked
-        like "clicking this button opens VLC and does nothing else." Falls
-        back to the folder if nothing's been downloaded yet this session."""
+    def open_output_file(self):
+        """Opens the most recently downloaded file with the OS's default app
+        for its type; if nothing was downloaded this session, opens the
+        output folder instead."""
         if self.last_downloaded_path and os.path.isfile(self.last_downloaded_path):
-            ok, msg = open_in_vlc(self.last_downloaded_path)
-        else:
-            target = self.last_output_dir or self._resolve_output_dir()
-            ok, msg = open_in_vlc(target)
-        if not ok:
-            messagebox.showwarning("VLC", msg)
+            self._open_media_or_warn(self.last_downloaded_path)
+            return
+        target = self.last_output_dir or self._resolve_output_dir()
+        if not target or not open_folder(target):
+            messagebox.showwarning("Open", "Nothing to open yet - download something first.")
+
+    def open_output_in_vlc(self):
+        """Opens the most recently downloaded file in VLC. Sits next to
+        'Open file' (OS default) rather than replacing it - both are
+        available."""
+        if self.last_downloaded_path and os.path.isfile(self.last_downloaded_path):
+            self._open_in_vlc_or_warn(self.last_downloaded_path)
+            return
+        messagebox.showwarning("VLC", "Nothing to open yet - download something first.")
 
     # ------------------------------------------------------------------ #
     def fetch_info_clicked(self):
@@ -1371,11 +1628,10 @@ class App(ctk.CTk):
         shows what happened while it was off, rather than a gap."""
         entry = (level, message, color)
         self._log_entries.append(entry)
-        if hasattr(self, "mini_log_label"):
-            mini_color = self.LOG_COLORS.get(color, "gray60")
-            self._last_mini_log_text = message
-            if self.tabview.get() != "Download":
-                self.mini_log_label.configure(text=message, text_color=mini_color)
+        # The mini one-line echo mirrors the *bottom line of the visible log*
+        # exactly - so it is updated only from _append_log_line (lines that
+        # actually make it into log_box at the current mode), never from here
+        # where a line might be filtered out or the log disabled.
         if not getattr(self, "log_enabled_var", None) or not self.log_enabled_var.get():
             return
         if self.LOG_LEVELS.get(level, 0) <= self.LOG_LEVELS.get(self._log_mode_var.get().lower(), 0):
@@ -1391,6 +1647,7 @@ class App(ctk.CTk):
         else:
             self.log_box.grid_remove()
             self.log_disabled_placeholder.grid()
+            self._sync_mini_log("")  # no visible log -> no bottom line to mirror
 
     def _append_log_line(self, message, color):
         self.log_box.configure(state="normal")
@@ -1403,17 +1660,22 @@ class App(ctk.CTk):
             self.log_box.insert("end", message + "\n")
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
-        # Mirrors the same line (and color, when it has one) into the
-        # one-line mini log echo shown on non-Download tabs. Only
-        # actually visually updated when NOT on the Download tab
-        # (which already has the real log right there) - _last_mini_log_text
-        # is still tracked either way, so switching to another tab
-        # later shows the truly most-recent message, not a stale one.
-        if hasattr(self, "mini_log_label"):
-            mini_color = self.LOG_COLORS.get(color, "gray60")
-            self._last_mini_log_text = message
-            if self.tabview.get() != "Download":
-                self.mini_log_label.configure(text=message, text_color=mini_color)
+        # This line is now the bottom line of the visible log, so mirror it
+        # into the one-line mini echo. _last_mini_log_text is tracked even
+        # while on the Download tab (which shows the real log right there),
+        # so switching to another tab later shows this exact line.
+        self._sync_mini_log(message, color)
+
+    def _sync_mini_log(self, message, color=None):
+        """Point the one-line mini log echo at `message` - always the current
+        bottom line of the visible log, same colour. Pass message="" to blank
+        it (log cleared / nothing displayed)."""
+        if not hasattr(self, "mini_log_label"):
+            return
+        self._last_mini_log_text = message
+        self._last_mini_log_color = self.LOG_COLORS.get(color, "gray60")
+        if self.tabview.get() != "Download":
+            self.mini_log_label.configure(text=message, text_color=self._last_mini_log_color)
 
     def _prompt_dev_feature_redirect(self, feature_description="This feature"):
         """Gate for anything that needs a Developer-tab feature toggle
@@ -1470,9 +1732,16 @@ class App(ctk.CTk):
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
         current_level = self.LOG_LEVELS.get(self._log_mode_var.get().lower(), 0)
-        for level, message, color in self._log_entries:
-            if self.LOG_LEVELS.get(level, 0) <= current_level:
-                self._append_log_line(message, color)
+        displayed = [(m, c) for lvl, m, c in self._log_entries
+                     if self.LOG_LEVELS.get(lvl, 0) <= current_level]
+        for message, color in displayed:
+            self._append_log_line(message, color)
+        # Keep the mini echo pinned to the new bottom line (or blank if the
+        # new mode filters everything out).
+        if displayed:
+            self._sync_mini_log(*displayed[-1])
+        else:
+            self._sync_mini_log("")
 
     @staticmethod
     def _format_eta(seconds):
@@ -1539,26 +1808,66 @@ class App(ctk.CTk):
         self.after(1000, self._tick_speed_display)
 
     def _update_eta_label(self):
-        """Builds the combined ETA text: this item's remaining time (from
-        the downloader's own live progress hook) and, if a batch/playlist
-        run is in progress with completed-item history to estimate from,
-        the whole queue's remaining time too."""
+        """Builds the combined ETA text: this item's remaining time and, if a
+        batch/playlist run is in progress, the whole queue's remaining time.
+
+        When the batch "pre-fetch file sizes" stage ran (self._batch_total_bytes
+        > 0), both estimates are SIZE-based: remaining bytes / rolling average
+        download speed. Otherwise they fall back to the item-count estimate
+        (average completed-item duration x items left) and yt-dlp's own
+        per-item ETA - i.e. exactly the pre-1.6.8 behaviour."""
         parts = []
-        item_eta = self._format_eta(self.downloader.last_eta_seconds) if self.downloader else None
+        dl = self.downloader
+        speed = dl.speed_tracker.get_average(window_seconds=5) if dl else None
+
+        item_done = (getattr(dl, "last_downloaded_bytes", 0) or 0) if dl else 0
+        item_total = getattr(dl, "last_total_bytes", None) if dl else None
+
+        # ---- current item ----
+        item_eta_seconds = None
+        if speed and speed > 0 and item_total and item_total > 0:
+            item_eta_seconds = max(item_total - item_done, 0) / speed
+        if item_eta_seconds is None and dl is not None:
+            item_eta_seconds = dl.last_eta_seconds
+        item_eta = self._format_eta(item_eta_seconds)
         if item_eta:
             parts.append(f"~{item_eta} left")
 
-        durations = getattr(self, "_batch_item_durations", None)
+        # ---- whole queue ----
+        total_bytes = getattr(self, "_batch_total_bytes", 0) or 0
         remaining_items = getattr(self, "_batch_items_remaining", 0)
-        if durations and remaining_items > 0:
-            avg = sum(durations) / len(durations)
-            queue_eta_seconds = avg * (remaining_items - 1) + (self.downloader.last_eta_seconds or avg
-                                                                 if self.downloader else avg)
-            queue_eta = self._format_eta(queue_eta_seconds)
-            if queue_eta:
-                parts.append(f"~{queue_eta} for whole queue")
+        queue_eta_seconds = None
+        size_based = False
+        if total_bytes > 0 and remaining_items > 0 and speed and speed > 0:
+            bytes_done = getattr(self, "_batch_bytes_done", 0) or 0
+            cur_url = getattr(self, "_batch_current_url", None)
+            cur_known = cur_url is not None and cur_url in getattr(self, "_batch_size_by_url", {})
+            # The current item's WHOLE progress (video + audio streams
+            # together) - subtract it only if this item's size is part of
+            # total_bytes, otherwise we'd remove bytes that were never counted.
+            item_all = dl.item_bytes_done() if (dl and hasattr(dl, "item_bytes_done")) else item_done
+            remaining_bytes = total_bytes - bytes_done - (item_all if cur_known else 0)
+            queue_eta_seconds = max(remaining_bytes, 0) / speed
+            size_based = True
+        else:
+            durations = getattr(self, "_batch_item_durations", None)
+            if durations and remaining_items > 0:
+                avg = sum(durations) / len(durations)
+                tail = (dl.last_eta_seconds if dl and dl.last_eta_seconds else avg)
+                queue_eta_seconds = avg * (remaining_items - 1) + tail
+        queue_eta = self._format_eta(queue_eta_seconds)
+        if queue_eta:
+            note = " (min)" if (size_based and self._batch_sizes_are_lower_bound()) else ""
+            parts.append(f"~{queue_eta} for whole queue{note}")
 
         self.eta_label.configure(text=" | ".join(parts))
+
+    def _batch_sizes_are_lower_bound(self):
+        """True when a size-based queue ETA is showing but at least one item's
+        size wasn't known during pre-fetch, so the real total is higher."""
+        if not (getattr(self, "_batch_total_bytes", 0) or 0) > 0:
+            return False
+        return bool(getattr(self, "_batch_prefetch_had_unknowns", False))
 
     def _on_main_tab_changed(self):
         """Shows the compact header progress bar + one-line log echo on
@@ -1589,9 +1898,22 @@ class App(ctk.CTk):
         if self.tabview.get() == "Download":
             self.mini_log_label.configure(text="")
         else:
-            self.mini_log_label.configure(text=getattr(self, "_last_mini_log_text", ""))
+            self.mini_log_label.configure(
+                text=getattr(self, "_last_mini_log_text", ""),
+                text_color=getattr(self, "_last_mini_log_color", "gray60"))
 
     # ------------------------------------------------------------------ #
+    def _single_download_busy(self):
+        """True while a single/batch/playlist download is running. Uses the
+        same signal the UI does - the Download button is disabled for the
+        whole run by _set_downloading_state - so a drag-and-drop auto-start
+        can't spin up a second download that would clobber self.downloader
+        and desync Cancel/progress."""
+        try:
+            return str(self.download_btn.cget("state")) == "disabled" or getattr(self, "batch_running", False)
+        except Exception:
+            return False
+
     def start_single_download(self):
         url = self.url_entry.get().strip()
         name = self.name_entry.get().strip()
@@ -1599,6 +1921,9 @@ class App(ctk.CTk):
 
         if not url:
             messagebox.showwarning("Missing URL", "Please enter a URL.")
+            return
+        if self._single_download_busy():
+            self._log("A download is already running - finish or cancel it first.")
             return
         # Name is no longer required - if left blank, _run_single fetches
         # the video's own title and uses that instead.
@@ -1819,8 +2144,16 @@ class App(ctk.CTk):
         into that playlist's folder."""
         self._threadsafe_log("Full playlist mode - looking up playlist info...")
         timeout_s = self.cfg.get("playlist_fetch_timeout_s", 60)
+        # A threading.Event so the Cancel button can abort a slow playlist
+        # lookup too (during the lookup there's no Downloader yet to cancel).
+        self._playlist_lookup_cancel = threading.Event()
         try:
-            info = fetch_playlist_info(url, timeout_seconds=timeout_s)
+            info = fetch_playlist_info(url, timeout_seconds=timeout_s,
+                                       cancel_event=self._playlist_lookup_cancel)
+        except PlaylistFetchCancelled:
+            self._threadsafe_log("Playlist lookup cancelled.")
+            self.after(0, lambda: self._set_downloading_state(False))
+            return
         except PlaylistFetchTimeout as e:
             self._threadsafe_log(str(e), color="red")
             self.after(0, lambda: self._set_downloading_state(False))
@@ -1854,9 +2187,23 @@ class App(ctk.CTk):
         self.downloader = None
         self._batch_item_durations = []
         self._batch_items_remaining = len(entry_urls)
+        self._reset_batch_size_state()
+
+        if self.cfg.get("batch_prefetch_sizes", False):
+            # _playlist_lookup_cancel is already wired to the Cancel button.
+            self._prefetch_batch_sizes(entry_urls, dtype,
+                                        lambda: self._playlist_lookup_cancel.is_set())
+            if self._playlist_lookup_cancel.is_set():
+                finish_request(request_id)
+                self._threadsafe_log("Playlist cancelled during size pre-fetch.", color="red")
+                self.after(0, lambda: self._set_downloading_state(False))
+                self.after(0, self._refresh_requests_tab)
+                return
+
         for i, entry_url in enumerate(entry_urls, start=1):
-            if self.downloader and self.downloader._cancel:
-                break
+            if (self.downloader and self.downloader._cancel) or self._playlist_lookup_cancel.is_set():
+                break  # _playlist_lookup_cancel also covers a Cancel between lookup and item 1
+            self._batch_current_url = entry_url
             update_item(request_id, entry_url, status="downloading")
             self.after(0, lambda i=i, t=len(entry_urls): self.queue_progress_label.configure(text=f"Playlist item {i}/{t}"))
             self.downloader = Downloader(progress_callback=self._threadsafe_progress, log_callback=self._threadsafe_log,
@@ -1884,6 +2231,8 @@ class App(ctk.CTk):
                     update_entry(history_entry_id, path=existing["path"], status="Skipped (duplicate)")
                     self.after(0, self._refresh_history_tab)
                     self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                    self._batch_bytes_done += self._batch_size_by_url.get(entry_url, 0)
+                    self._batch_current_url = None  # nothing downloading during the skip pause
                     continue
 
             status, path = "Success", ""
@@ -1953,6 +2302,8 @@ class App(ctk.CTk):
             update_entry(history_entry_id, name=unique_name, path=path, status=status)
             self.after(0, self._refresh_history_tab)
             self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+            self._batch_bytes_done += self._batch_size_by_url.get(entry_url, 0)
+            self._batch_current_url = None  # nothing downloading during the inter-item delay
             if status == "Success":
                 self._batch_item_durations.append(self.downloader.elapsed_seconds())
 
@@ -1964,12 +2315,80 @@ class App(ctk.CTk):
                     time.sleep(min(0.25, delay_s - waited))
                     waited += 0.25
 
+        self._batch_current_url = None
         finish_request(request_id)
         self._threadsafe_log("Playlist download finished.", color="green")
         self.after(0, lambda: self._set_downloading_state(False))
         self.after(0, self._refresh_history_tab)
         self.after(0, self._refresh_requests_tab)
         self.after(0, self._refresh_playlists_tab)
+
+    # ------------------------------------------------------------------ #
+    def _reset_batch_size_state(self):
+        self._batch_total_bytes = 0
+        self._batch_bytes_done = 0
+        self._batch_size_by_url = {}
+        self._batch_current_url = None
+        self._batch_prefetch_had_unknowns = False
+
+    def _prefetch_batch_sizes(self, urls, dtype, cancel_check):
+        """Optional pre-download pass (Advanced > "Pre-fetch file sizes before
+        a batch"): fetch ONLY each item's download size, nothing else, so the
+        queue/item ETAs can be size-based. Best-effort - a size that can't be
+        determined is simply excluded from the total (the ETA then reads as a
+        lower bound). Honours cancel_check() (abort cleanly) and spaces the
+        requests out so it doesn't hammer the site. Never raises."""
+        self._reset_batch_size_state()
+        total = len(urls)
+        delay_s = max(0, self.cfg.get("batch_delay_seconds", 0))
+        gap = min(delay_s, 3) if delay_s else 0.4  # don't fire dozens of lookups instantly
+        quality_key = self.cfg.get("video_quality", "Best")
+        aspect = self.aspect_var.get() if hasattr(self, "aspect_var") else "Any"
+        cookies = self.cfg.get("cookies_from_browser", "none")
+        known = 0
+        self._threadsafe_log(f"Pre-fetching file sizes for {total} item(s) "
+                              f"(only sizes - nothing is downloaded yet)...", color="blue")
+        for i, url in enumerate(urls, start=1):
+            if cancel_check():
+                self._threadsafe_log("Size pre-fetch cancelled.", color="red")
+                return
+            self.after(0, lambda i=i, t=total:
+                       self.queue_progress_label.configure(text=f"Pre-fetching sizes {i}/{t}"))
+            try:
+                size = fetch_download_size(url, dtype=dtype, quality_key=quality_key,
+                                           aspect_ratio=aspect, cookies_from_browser=cookies)
+            except Exception:
+                size = None
+            if size and size > 0:
+                self._batch_size_by_url[url] = int(size)
+                self._batch_total_bytes += int(size)
+                known += 1
+            else:
+                self._batch_prefetch_had_unknowns = True
+            # Progress goes to the one-line queue label every item; the main
+            # log only gets a line every 10th, so a big playlist isn't 200
+            # lines of noise.
+            if i % 10 == 0 or i == total:
+                self._threadsafe_log(f"Pre-fetching file sizes... {i}/{total}", color="blue")
+            if gap and i < total:
+                waited = 0.0
+                while waited < gap:
+                    if cancel_check():
+                        self._threadsafe_log("Size pre-fetch cancelled.", color="red")
+                        return
+                    time.sleep(min(0.2, gap - waited))
+                    waited += 0.2
+        unknown = total - known
+        if self._batch_total_bytes > 0:
+            mb = self._batch_total_bytes / (1024 * 1024)
+            size_str = f"{mb / 1024:.2f} GB" if mb >= 1024 else f"{mb:.1f} MB"
+            msg = f"Pre-fetch complete: ~{size_str} across {known} item(s)."
+            if unknown:
+                msg += f" {unknown} item(s) had no known size - the queue ETA is a lower bound."
+            self._threadsafe_log(msg, color="blue")
+        else:
+            self._threadsafe_log("Pre-fetch complete: no sizes could be determined - "
+                                  "ETAs will use the item-count estimate.", color="blue")
 
     # ------------------------------------------------------------------ #
     def start_batch_download(self):
@@ -2032,131 +2451,156 @@ class App(ctk.CTk):
         # over from a previous batch.
         self._batch_item_durations = []
         self._batch_items_remaining = total
-        for i, url in enumerate(urls, start=1):
-            if self.downloader and self.downloader._cancel:
-                break
-            update_item(request_id, url, status="downloading")
-            self._threadsafe_log(f"--- Queue item {i}/{total} ---")
-            self.after(0, lambda i=i, total=total: self.queue_progress_label.configure(text=f"Queue item {i}/{total}"))
-            self.downloader = Downloader(progress_callback=self._threadsafe_progress, log_callback=self._threadsafe_log,
-                                          ping_ms_provider=lambda: self._network_ping)
-            history_entry_id = add_entry(url, url, dtype, "", "Analyzing")
-            self.after(0, self._refresh_history_tab)
-            media_info = None
-            try:
-                media_info = fetch_media_info(url)
-                name = sanitize_filename(beautify_title(media_info.get("title", f"download_{i}")))
-            except Exception as e:
-                self._threadsafe_log(f"Could not fetch info for {url}: {e}")
-                name = f"download_{i}"
+        self._reset_batch_size_state()
 
-            ext = self.cfg["video_format"] if dtype == "Video" else self.cfg["audio_format"]
-            unique_name = make_unique_name(out_dir, name, ext)
-            update_item(request_id, url, name=unique_name)
-            update_entry(history_entry_id, name=unique_name)
-            self.after(0, self._refresh_history_tab)
+        try:
+            # Optional pre-fetch stage: size-only pass over the queue before any
+            # real download starts, so the ETAs below become size-based.
+            if self.cfg.get("batch_prefetch_sizes", False):
+                self._prefetch_cancel = threading.Event()
+                self._prefetch_batch_sizes(urls, dtype, lambda: self._prefetch_cancel.is_set())
+                cancelled = self._prefetch_cancel.is_set()
+                if cancelled:
+                    self._threadsafe_log("Batch cancelled during size pre-fetch.", color="red")
+                    return  # try/finally below resets batch_running + UI state
 
-            if self.cfg.get("duplicate_detection_enabled", True):
-                existing = find_previous_download(url, out_dir)
-                if existing:
-                    self._threadsafe_log(f"Skipped item {i}/{total} - already downloaded to "
-                                          f"{existing['path']}.", color="blue")
-                    update_item(request_id, url, status="skipped", path=existing["path"])
-                    update_entry(history_entry_id, path=existing["path"], status="Skipped (duplicate)")
+            for i, url in enumerate(urls, start=1):
+                if ((self.downloader and self.downloader._cancel)
+                        or (self._prefetch_cancel is not None and self._prefetch_cancel.is_set())):
+                    break
+                self._batch_current_url = url
+                update_item(request_id, url, status="downloading")
+                self._threadsafe_log(f"--- Queue item {i}/{total} ---")
+                self.after(0, lambda i=i, total=total: self.queue_progress_label.configure(text=f"Queue item {i}/{total}"))
+                self.downloader = Downloader(progress_callback=self._threadsafe_progress, log_callback=self._threadsafe_log,
+                                              ping_ms_provider=lambda: self._network_ping)
+                history_entry_id = add_entry(url, url, dtype, "", "Analyzing")
+                self.after(0, self._refresh_history_tab)
+                media_info = None
+                try:
+                    media_info = fetch_media_info(url)
+                    name = sanitize_filename(beautify_title(media_info.get("title", f"download_{i}")))
+                except Exception as e:
+                    self._threadsafe_log(f"Could not fetch info for {url}: {e}")
+                    name = f"download_{i}"
+
+                ext = self.cfg["video_format"] if dtype == "Video" else self.cfg["audio_format"]
+                unique_name = make_unique_name(out_dir, name, ext)
+                update_item(request_id, url, name=unique_name)
+                update_entry(history_entry_id, name=unique_name)
+                self.after(0, self._refresh_history_tab)
+
+                if self.cfg.get("duplicate_detection_enabled", True):
+                    existing = find_previous_download(url, out_dir)
+                    if existing:
+                        self._threadsafe_log(f"Skipped item {i}/{total} - already downloaded to "
+                                              f"{existing['path']}.", color="blue")
+                        update_item(request_id, url, status="skipped", path=existing["path"])
+                        update_entry(history_entry_id, path=existing["path"], status="Skipped (duplicate)")
+                        self.after(0, self._refresh_history_tab)
+                        self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                        self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
+                        self._batch_current_url = None  # nothing downloading during the skip pause
+                        if delay_s and i < total:
+                            time.sleep(min(delay_s, 2))  # a short courtesy pause even on a skip, nothing more
+                        continue
+
+                status, path = "Success", ""
+                update_entry(history_entry_id, status="In Progress")
+                self.after(0, self._refresh_history_tab)
+                try:
+                    if dtype == "Video":
+                        self._threadsafe_log(f'Downloading "{unique_name}"', color="blue")
+                        path = download_with_retry(
+                            self.downloader.download_video, log_callback=self._threadsafe_log,
+                            url=url, name=unique_name, out_dir=out_dir,
+                            quality_key=self.cfg["video_quality"], fmt=self.cfg["video_format"],
+                            playlist=False, subtitles=self.subtitles_var.get(), aspect_ratio=self.aspect_var.get(),
+                            cookies_from_browser=self.cfg.get("cookies_from_browser", "none"),
+                            prefetched_info=media_info
+                        )
+                    else:
+                        self._threadsafe_log(f'Downloading "{unique_name}"', color="blue")
+                        path = download_with_retry(
+                            self.downloader.download_audio, log_callback=self._threadsafe_log,
+                            url=url, name=unique_name, out_dir=out_dir,
+                            quality=self.cfg["audio_quality"], fmt=self.cfg["audio_format"],
+                            playlist=False, embed_thumbnail=self.cfg.get("embed_thumbnail", True),
+                            cookies_from_browser=self.cfg.get("cookies_from_browser", "none")
+                        )
+                    self._threadsafe_log(f"Saved: {path}")
+                    update_item(request_id, url, status="success", path=path,
+                                elapsed_seconds=self.downloader.elapsed_seconds())
+                except DownloadCancelled:
+                    self._threadsafe_log("Batch cancelled.")
+                    status = "Cancelled"
+                    removed, still_locked = cleanup_partial_files(out_dir, unique_name)
+                    if removed:
+                        self._threadsafe_log(f"Removed {len(removed)} partial file(s) from the cancelled item.")
+                    if still_locked:
+                        self._threadsafe_log(f"{len(still_locked)} partial file(s) still in use, couldn't be "
+                                              f"removed - you may need to delete them manually.", color="red")
+                    update_item(request_id, url, status="failed", error="Cancelled by user")
+                    update_entry(history_entry_id, path=path, status=status)
                     self.after(0, self._refresh_history_tab)
-                    self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
-                    if delay_s and i < total:
-                        time.sleep(min(delay_s, 2))  # a short courtesy pause even on a skip, nothing more
-                    continue
+                    break
+                except YouTubeBotDetectedError:
+                    status = "Failed"
+                    self._handle_bot_detection(request_id, url)
+                    update_entry(history_entry_id, path=path, status=status)
+                    self.after(0, self._refresh_history_tab)
+                    break  # stop the whole queue, not just this item - see _handle_bot_detection
+                except CookieAccessError:
+                    status = "Failed"
+                    self._handle_cookie_access_error(request_id, url)
+                    update_entry(history_entry_id, path=path, status=status)
+                    self.after(0, self._refresh_history_tab)
+                    break
+                except DownloadStageError as e:
+                    status = "Failed"
+                    err = f"Failed during {e.stage} for {url}: {e.original}"
+                    self._threadsafe_log(err, color="red")
+                    update_item(request_id, url, status="failed", error=err,
+                                elapsed_seconds=self.downloader.elapsed_seconds())
+                except Exception as e:
+                    status = "Failed"
+                    err = f"Unexpected error for {url}: {e}"
+                    self._threadsafe_log(err, color="red")
+                    update_item(request_id, url, status="failed", error=err,
+                                elapsed_seconds=self.downloader.elapsed_seconds())
+                update_entry(history_entry_id, name=unique_name, path=path, status=status)
+                self.after(0, self._refresh_history_tab)
+                self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
+                self._batch_current_url = None  # nothing downloading during the inter-item delay
+                if status == "Success":
+                    self._batch_item_durations.append(self.downloader.elapsed_seconds())
 
-            status, path = "Success", ""
-            update_entry(history_entry_id, status="In Progress")
+                # Space requests out - helps avoid triggering YouTube's bot
+                # detection in the first place, not just react to it after
+                # the fact. Skipped after the very last item (nothing left to
+                # wait for) and broken into small checks against cancel so a
+                # long delay doesn't make the Cancel button feel unresponsive.
+                if delay_s and i < total and not (self.downloader and self.downloader._cancel):
+                    waited = 0.0
+                    while waited < delay_s:
+                        if self.downloader and self.downloader._cancel:
+                            break
+                        time.sleep(min(0.25, delay_s - waited))
+                        waited += 0.25
+
+        except Exception as e:
+            self._threadsafe_log(f"Batch queue stopped on an unexpected error: {e}", color="red")
+        else:
+            self._threadsafe_log("Batch queue finished.", color="green")
+        finally:
+            self.batch_running = False
+            self._batch_current_url = None
+            self._prefetch_cancel = None
+            finish_request(request_id)
+            self.after(0, lambda: self._set_downloading_state(False, batch=True))
             self.after(0, self._refresh_history_tab)
-            try:
-                if dtype == "Video":
-                    self._threadsafe_log(f'Downloading "{unique_name}"', color="blue")
-                    path = download_with_retry(
-                        self.downloader.download_video, log_callback=self._threadsafe_log,
-                        url=url, name=unique_name, out_dir=out_dir,
-                        quality_key=self.cfg["video_quality"], fmt=self.cfg["video_format"],
-                        playlist=False, subtitles=self.subtitles_var.get(), aspect_ratio=self.aspect_var.get(),
-                        cookies_from_browser=self.cfg.get("cookies_from_browser", "none"),
-                        prefetched_info=media_info
-                    )
-                else:
-                    self._threadsafe_log(f'Downloading "{unique_name}"', color="blue")
-                    path = download_with_retry(
-                        self.downloader.download_audio, log_callback=self._threadsafe_log,
-                        url=url, name=unique_name, out_dir=out_dir,
-                        quality=self.cfg["audio_quality"], fmt=self.cfg["audio_format"],
-                        playlist=False, embed_thumbnail=self.cfg.get("embed_thumbnail", True),
-                        cookies_from_browser=self.cfg.get("cookies_from_browser", "none")
-                    )
-                self._threadsafe_log(f"Saved: {path}")
-                update_item(request_id, url, status="success", path=path,
-                            elapsed_seconds=self.downloader.elapsed_seconds())
-            except DownloadCancelled:
-                self._threadsafe_log("Batch cancelled.")
-                status = "Cancelled"
-                removed, still_locked = cleanup_partial_files(out_dir, unique_name)
-                if removed:
-                    self._threadsafe_log(f"Removed {len(removed)} partial file(s) from the cancelled item.")
-                if still_locked:
-                    self._threadsafe_log(f"{len(still_locked)} partial file(s) still in use, couldn't be "
-                                          f"removed - you may need to delete them manually.", color="red")
-                update_item(request_id, url, status="failed", error="Cancelled by user")
-                update_entry(history_entry_id, path=path, status=status)
-                self.after(0, self._refresh_history_tab)
-                break
-            except YouTubeBotDetectedError:
-                status = "Failed"
-                self._handle_bot_detection(request_id, url)
-                update_entry(history_entry_id, path=path, status=status)
-                self.after(0, self._refresh_history_tab)
-                break  # stop the whole queue, not just this item - see _handle_bot_detection
-            except CookieAccessError:
-                status = "Failed"
-                self._handle_cookie_access_error(request_id, url)
-                update_entry(history_entry_id, path=path, status=status)
-                self.after(0, self._refresh_history_tab)
-                break
-            except DownloadStageError as e:
-                status = "Failed"
-                err = f"Failed during {e.stage} for {url}: {e.original}"
-                self._threadsafe_log(err, color="red")
-                update_item(request_id, url, status="failed", error=err,
-                            elapsed_seconds=self.downloader.elapsed_seconds())
-            except Exception as e:
-                status = "Failed"
-                err = f"Unexpected error for {url}: {e}"
-                self._threadsafe_log(err, color="red")
-                update_item(request_id, url, status="failed", error=err,
-                            elapsed_seconds=self.downloader.elapsed_seconds())
-            update_entry(history_entry_id, name=unique_name, path=path, status=status)
-            self.after(0, self._refresh_history_tab)
-            self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
-            if status == "Success":
-                self._batch_item_durations.append(self.downloader.elapsed_seconds())
-
-            # Space requests out - helps avoid triggering YouTube's bot
-            # detection in the first place, not just react to it after
-            # the fact. Skipped after the very last item (nothing left to
-            # wait for) and broken into small checks against cancel so a
-            # long delay doesn't make the Cancel button feel unresponsive.
-            if delay_s and i < total and not (self.downloader and self.downloader._cancel):
-                waited = 0.0
-                while waited < delay_s:
-                    if self.downloader and self.downloader._cancel:
-                        break
-                    time.sleep(min(0.25, delay_s - waited))
-                    waited += 0.25
-
-        self.batch_running = False
-        finish_request(request_id)
-        self._threadsafe_log("Batch queue finished.", color="green")
-        self.after(0, lambda: self._set_downloading_state(False, batch=True))
-        self.after(0, self._refresh_history_tab)
-        self.after(0, self._refresh_requests_tab)
+            self.after(0, self._refresh_requests_tab)
 
     # ------------------------------------------------------------------ #
     def _set_downloading_state(self, downloading, batch=False):
@@ -2174,11 +2618,18 @@ class App(ctk.CTk):
             self.eta_label.configure(text="")
             self._batch_item_durations = []
             self._batch_items_remaining = 0
+            self._reset_batch_size_state()
 
     def cancel_download(self):
+        lookup_cancel = getattr(self, "_playlist_lookup_cancel", None)
+        if lookup_cancel is not None:
+            lookup_cancel.set()  # abort a slow playlist-info lookup, if one is running
+        prefetch_cancel = getattr(self, "_prefetch_cancel", None)
+        if prefetch_cancel is not None:
+            prefetch_cancel.set()  # abort a batch size pre-fetch pass, if one is running
         if self.downloader:
             self.downloader.cancel()
-            self.cancel_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="disabled")
 
     def _threadsafe_log(self, message, level="simple", color=None):
         self.after(0, lambda: self._log(message, level=level, color=color))
@@ -2193,8 +2644,8 @@ class App(ctk.CTk):
         """Every playlist gets a real folder on disk under
         <download_root>/Playlists/<name>, created on demand. This is what
         the output-folder dropdown on the Download tab points at when you
-        pick a playlist to download directly into, and what "Open folder"/
-        "Open in VLC" (whole playlist) act on."""
+        pick a playlist to download directly into, and what the playlist's
+        "Open folder" button acts on."""
         root = self.cfg.get("playlists_path", "")
         if not root:
             return None
@@ -2235,6 +2686,7 @@ class App(ctk.CTk):
         playlist_search_entry = ctk.CTkEntry(playlist_search_row, textvariable=self.playlist_search_var,
                                               font=self.font_small, placeholder_text="Search playlists...")
         playlist_search_entry.pack(side="left", fill="x", expand=True)
+        playlist_search_entry.bind("<Return>", lambda e: self._refresh_playlists_tab())
         self._add_search_clear_button(playlist_search_entry, self.playlist_search_var)
         self.playlist_search_var.trace_add(
             "write", lambda *_: self._debounced_call("_playlist_search_after_id", 300, self._refresh_playlists_tab))
@@ -2272,10 +2724,6 @@ class App(ctk.CTk):
             fg_color="gray40", hover_color="gray30", state="disabled",
             command=self._open_playlist_folder)
         self.playlist_open_folder_btn.grid(row=0, column=1, padx=(10, 0))
-        self.playlist_open_vlc_btn = ctk.CTkButton(
-            title_row, text="Open in VLC", width=100, font=self.font_normal, state="disabled",
-            **VLC_BUTTON_COLORS, command=self._open_playlist_in_vlc)
-        self.playlist_open_vlc_btn.grid(row=0, column=2, padx=(10, 0))
 
         ctk.CTkLabel(right, text="This playlist is just a folder on disk - drag files in or out with your "
                                   "regular file manager too, this list always reflects what's actually there.",
@@ -2333,7 +2781,6 @@ class App(ctk.CTk):
             self.selected_playlist = None
             self.playlist_title_label.configure(text="Select a playlist")
             self.playlist_open_folder_btn.configure(state="disabled")
-            self.playlist_open_vlc_btn.configure(state="disabled")
             for w in self.playlist_items_frame.winfo_children():
                 w.destroy()
         self._refresh_output_playlist_dropdown()
@@ -2463,7 +2910,6 @@ class App(ctk.CTk):
         self.selected_playlist = name
         self.playlist_title_label.configure(text=name)
         self.playlist_open_folder_btn.configure(state="normal")
-        self.playlist_open_vlc_btn.configure(state="normal")
         for w in self.playlist_items_frame.winfo_children():
             w.destroy()
         root = self.cfg.get("playlists_path", "")
@@ -2484,8 +2930,10 @@ class App(ctk.CTk):
             if size_label:
                 ctk.CTkLabel(row, text=size_label, font=self.font_small, text_color="gray60").pack(
                     side="left", padx=(0, 8))
-            ctk.CTkButton(row, text="Open", width=55, font=self.font_small, **VLC_BUTTON_COLORS,
+            ctk.CTkButton(row, text="Open", width=55, font=self.font_small,
                           command=lambda p=full_path: self._open_media_or_warn(p)).pack(side="left", padx=4)
+            ctk.CTkButton(row, text="VLC", width=45, font=self.font_small, **VLC_BUTTON_COLORS,
+                          command=lambda p=full_path: self._open_in_vlc_or_warn(p)).pack(side="left", padx=(0, 4))
             ctk.CTkButton(row, text="Location", width=70, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
                           command=lambda p=full_path: self._open_or_warn(os.path.dirname(p))).pack(
@@ -2501,31 +2949,32 @@ class App(ctk.CTk):
         if not folder or not open_folder(folder):
             messagebox.showwarning("Not found", "That playlist's folder couldn't be opened.")
 
-    def _open_playlist_in_vlc(self):
-        if not self.selected_playlist:
-            return
-        folder = self._playlist_folder(self.selected_playlist)
-        ok, msg = open_in_vlc(folder)
-        if not ok:
-            messagebox.showwarning("VLC", msg)
-
     def _remove_from_playlist(self, filename):
         remove_file_from_playlist(self.cfg.get("playlists_path", ""), self.selected_playlist, filename)
         self._select_playlist(self.selected_playlist)
 
-    def _vlc_or_warn(self, path):
+    def _open_in_vlc_or_warn(self, path):
+        """Launch a file in VLC. If VLC isn't installed, warn gracefully
+        with a pointer to the Version tab / videolan.org rather than
+        crashing or silently doing nothing."""
         ok, msg = open_in_vlc(path)
-        if not ok:
-            messagebox.showwarning("VLC", msg)
+        if ok:
+            return
+        if "isn't installed" in msg:
+            if messagebox.askyesno(
+                    "VLC not found",
+                    f"{msg}\n\nOpen the VLC download page now?"):
+                webbrowser.open(VLC_DOWNLOAD_PAGE)
+            return
+        messagebox.showwarning("VLC", msg)
 
     def _open_media_or_warn(self, path):
-        """File-type-aware open: video/audio go to VLC (if installed),
-        everything else opens with the OS's own default app for it -
-        consistent per file type rather than always assuming VLC. A
+        """Opens the file with the OS's own
+        default app for its type. A
         genuine permissions problem gets the same elevated-access
         redirect offer as _open_with_permission_redirect, rather than
         just a plain "couldn't open this" warning with no path forward."""
-        ok, msg = open_media_smart(path)
+        ok, msg = open_file(path)
         if ok:
             return
         if msg == "permission_denied":
@@ -2581,9 +3030,13 @@ class App(ctk.CTk):
         filter_row = ctk.CTkFrame(tab, fg_color="transparent")
         filter_row.grid(row=0, column=0, sticky="ew", pady=(10, 6))
         self.library_search_var = ctk.StringVar(value="")
+        # Fixed width rather than fill/expand: letting the search box eat all
+        # the leftover row space is what squished the Sort / Type / Refresh
+        # controls to its right on a normal-width window.
         search_entry = ctk.CTkEntry(filter_row, textvariable=self.library_search_var, font=self.font_normal,
-                                     placeholder_text="Search your library...")
-        search_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+                                     width=240, placeholder_text="Search your library...")
+        search_entry.pack(side="left", padx=(0, 8))
+        search_entry.bind("<Return>", lambda e: self._refresh_library_tab())
         self._add_search_clear_button(search_entry, self.library_search_var)
         self.library_search_var.trace_add(
             "write", lambda *_: self._debounced_call("_library_search_after_id", 300, self._refresh_library_tab))
@@ -2686,22 +3139,25 @@ class App(ctk.CTk):
                 subtitle = f"Duplicate group {item['duplicate_group']} - " + subtitle
             ctk.CTkLabel(row, text=subtitle, font=self.font_small, text_color="gray60", anchor="w").grid(
                 row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
-            ctk.CTkButton(row, text="Open", width=60, font=self.font_small, **VLC_BUTTON_COLORS,
+            ctk.CTkButton(row, text="Open", width=60, font=self.font_small,
                           command=lambda p=item["path"]: self._open_media_or_warn(p)).grid(
                 row=0, column=1, rowspan=2, padx=6)
+            ctk.CTkButton(row, text="VLC", width=45, font=self.font_small, **VLC_BUTTON_COLORS,
+                          command=lambda p=item["path"]: self._open_in_vlc_or_warn(p)).grid(
+                row=0, column=2, rowspan=2, padx=(0, 6))
             ctk.CTkButton(row, text="Location", width=75, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
                           command=lambda p=item["path"]: self._open_or_warn(os.path.dirname(p))).grid(
-                row=0, column=2, rowspan=2, padx=(0, 6))
+                row=0, column=3, rowspan=2, padx=(0, 6))
             ctk.CTkButton(row, text="Archive", width=70, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
                           command=lambda p=item["path"], n=item["name"]: self._archive_library_file(p, n)).grid(
-                row=0, column=3, rowspan=2, padx=(0, 6))
+                row=0, column=4, rowspan=2, padx=(0, 6))
             delete_btn = ctk.CTkButton(row, text="Delete", width=65, font=self.font_small, fg_color="#a13333",
                                         hover_color="#7d2626")
             delete_btn.configure(command=lambda p=item["path"], n=item["name"], b=delete_btn:
                                   self._delete_library_file_clicked(p, n, b))
-            delete_btn.grid(row=0, column=4, rowspan=2, padx=(0, 10))
+            delete_btn.grid(row=0, column=5, rowspan=2, padx=(0, 10))
 
     def _archive_library_file(self, path, name):
         """Moves this file - and any other file sharing the same base
@@ -2823,6 +3279,7 @@ class App(ctk.CTk):
         search_entry = ctk.CTkEntry(filter_row, textvariable=self.history_search_var, font=self.font_normal,
                                      placeholder_text="Search downloaded names...")
         search_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        search_entry.bind("<Return>", lambda e: self._refresh_history_tab())
         self._add_search_clear_button(search_entry, self.history_search_var)
         self.history_search_var.trace_add(
             "write", lambda *_: self._debounced_call("_history_search_after_id", 300, self._refresh_history_tab))
@@ -3004,9 +3461,30 @@ class App(ctk.CTk):
             folder = os.path.dirname(path) or ""
             ctk.CTkButton(row, text="Open folder", width=100, font=self.font_small,
                           command=lambda f=folder: self._open_or_warn(f)).grid(row=0, column=col + 1, rowspan=2, padx=6)
-            ctk.CTkButton(row, text="VLC", width=55, font=self.font_small, **VLC_BUTTON_COLORS,
-                          command=lambda p=path: self._vlc_or_warn(p)).grid(
-                row=0, column=col + 2, rowspan=2, padx=(0, 10))
+            ctk.CTkButton(row, text="Open file", width=75, font=self.font_small,
+                          fg_color="gray40", hover_color="gray30",
+                          command=lambda p=path: self._open_media_or_warn(p)).grid(
+                row=0, column=col + 2, rowspan=2, padx=(0, 6))
+            ctk.CTkButton(row, text="VLC", width=45, font=self.font_small, **VLC_BUTTON_COLORS,
+                          command=lambda p=path: self._open_in_vlc_or_warn(p)).grid(
+                row=0, column=col + 3, rowspan=2, padx=(0, 6))
+            ctk.CTkButton(row, text="Delete", width=60, font=self.font_small,
+                          fg_color="#a13333", hover_color="#7d2626",
+                          command=lambda eid=entry.get("id"), nm=entry.get("name", ""):
+                              self._delete_history_entry_clicked(eid, nm)).grid(
+                row=0, column=col + 4, rowspan=2, padx=(0, 10))
+
+    def _delete_history_entry_clicked(self, entry_id, name):
+        """Per-row delete for a single History entry - removes just that
+        record (not the downloaded file). Confirms first, like Clear
+        History does."""
+        if entry_id is None:
+            return
+        label = f'"{name}"' if name else "this entry"
+        if messagebox.askyesno("Delete history entry",
+                               f"Remove {label} from the download history?\n\n"
+                               "This only removes the history record - the downloaded file is left alone."):
+            self._delete_history_entry(entry_id)
 
     def _open_or_warn(self, folder):
         if not open_folder(folder):
@@ -3198,10 +3676,13 @@ class App(ctk.CTk):
         launch_header_row.pack(anchor="w", fill="x")
         self._sub_header(launch_header_row, "Launch Size", pack_side="left")
         self._add_hint_icon(launch_header_row, "Only applies when the app is opened, not while it's already "
-                             "running. \"Fullscreen\" maximizes the window (not a borderless fullscreen mode); "
-                             "\"Remembered\" also keeps the window locked to a visible part of the screen "
-                             "even if your monitor setup changes.").pack(side="left", padx=(4, 0), pady=(14, 6))
-        self.launch_resolution_var = ctk.StringVar(value=self.cfg.get("launch_resolution", "Remembered"))
+                             "running. \"Fullscreen\" maximizes the window (not a borderless fullscreen mode). "
+                             "\"Remembered\" reopens at the last size, centered on screen - and restores a "
+                             "maximized window if you left it maximized. A fixed size is always centered "
+                             "too.").pack(side="left", padx=(4, 0), pady=(14, 6))
+        _stored_launch = self.cfg.get("launch_resolution", "Fullscreen")
+        self.launch_resolution_var = ctk.StringVar(
+            value="Remembered (last size)" if _stored_launch.startswith("Remembered") else _stored_launch)
         ScrollableDropdown(scroll, self._resolution_preset_choices(), self.launch_resolution_var,
                             font=self.font_normal, width=300,
                             command=self._on_launch_resolution_changed).pack(anchor="w", padx=5, pady=(0, 8))
@@ -3291,6 +3772,21 @@ class App(ctk.CTk):
                              "drop it (no confirmation needed, since it's undoable), Undo or Ctrl+Z to bring "
                              "it back. Removed URLs aren't truly gone until you actually start the "
                              "download.").pack(side="left", padx=(8, 0))
+
+        prefetch_switch_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        prefetch_switch_row.pack(anchor="w", padx=5, pady=(0, 15))
+        self.batch_prefetch_sizes_var = ctk.BooleanVar(value=self.cfg.get("batch_prefetch_sizes", False))
+        ctk.CTkSwitch(prefetch_switch_row, text="Pre-fetch file sizes before a batch", font=self.font_normal,
+                      variable=self.batch_prefetch_sizes_var,
+                      command=self._on_batch_prefetch_sizes_changed).pack(side="left")
+        self._add_hint_icon(prefetch_switch_row, "Before a batch or full-playlist download starts, do a "
+                             "pass that fetches ONLY each item's download size (nothing is downloaded yet). "
+                             "The queue's \"time remaining\" and each item's ETA are then based on bytes left "
+                             "over the current average speed, instead of just the number of items left.\n\n"
+                             "This makes one extra lookup per item and waits between them (using your batch "
+                             "delay), so on a large playlist it can take a few minutes before the first "
+                             "download begins - you can Cancel during the pass. Off by default.").pack(
+            side="left", padx=(8, 0))
 
         # ============================================================ #
         # ACCESSIBILITY
@@ -3421,12 +3917,23 @@ class App(ctk.CTk):
                                         "success" if not failed else "info")
             MoveFilesDialog(self, existing_files, self.font_normal, self.font_label, do_move)
 
+        old_root = self.cfg.get("download_root", "")
         self.cfg["download_root"] = new_root
         self.cfg["video_path"] = new_video
         self.cfg["music_path"] = new_music
         self.cfg["playlists_path"] = new_playlists
+        # A9: keep the Media Library pointed at the current download folder -
+        # drop the old auto-added root, add the new one (a fresh choice also
+        # clears any earlier opt-out).
+        lib_dirs = self.cfg.setdefault("media_library_directories", [])
+        if old_root and old_root in lib_dirs:
+            lib_dirs.remove(old_root)
+        self.cfg["media_library_download_root_optout"] = False
         save_config(self.cfg)
+        self._ensure_download_root_in_library()
         self.download_root_label.configure(text=new_root)
+        if hasattr(self, "library_dirs_frame") and self.library_dirs_frame.winfo_exists():
+            self._refresh_library_dirs_list()
         self._log(f"Default download folder changed to {new_root}")
 
     def _default_bg_color(self):
@@ -3543,6 +4050,14 @@ class App(ctk.CTk):
         for w in self.version_status_frame.winfo_children():
             w.destroy()
         self.version_rows = {}
+
+        # The app itself, shown first and in the same row layout as every
+        # dependency - a green/red dot, name, a detail line, and an Update
+        # button on the right in the same column as the others. The actual
+        # update check hits the network, so it runs in a thread and fills
+        # this row in when it returns.
+        self._build_app_version_row()
+
         for item in deps.check_all():
             row = ctk.CTkFrame(self.version_status_frame)
             row.pack(fill="x", pady=4)
@@ -3554,6 +4069,16 @@ class App(ctk.CTk):
                 row=0, column=1, sticky="ew", padx=10, pady=(8, 0))
             ctk.CTkLabel(row, text=item["detail"], font=self.font_small, anchor="w", text_color="gray60").grid(
                 row=1, column=1, sticky="ew", padx=10, pady=(0, 8))
+            if item["kind"] == "vlc":
+                # VLC is never auto-installed. If it's found, it just shows
+                # green with no button, like every other satisfied dep. If
+                # it's missing, offer a link out to the download page
+                # rather than an Install button.
+                if not item["ok"]:
+                    ctk.CTkButton(row, text="Get VLC", width=90, font=self.font_normal,
+                                  **VLC_BUTTON_COLORS,
+                                  command=self._get_vlc_clicked).grid(row=0, column=2, rowspan=2, padx=10)
+                continue
             btn_text = "Update" if item["ok"] else "Install"
             btn = ctk.CTkButton(row, text=btn_text, width=90, font=self.font_normal,
                                 command=lambda it=item: self._install_or_update(it))
@@ -3562,6 +4087,102 @@ class App(ctk.CTk):
 
         self._refresh_dependency_banner()
 
+    def _build_app_version_row(self):
+        """The 'Media Downloader' row at the top of the Version tab list -
+        same layout as a dependency row, with an Update button (column 2,
+        like the others) once a background check finds a newer release."""
+        from core.app_info import APP_VERSION
+        row = ctk.CTkFrame(self.version_status_frame)
+        row.pack(fill="x", pady=4)
+        row.grid_columnconfigure(1, weight=1)
+        self._app_row_dot = ctk.CTkLabel(row, text="●", text_color="gray50",
+                                          font=self.font_label, width=20)
+        self._app_row_dot.grid(row=0, column=0, rowspan=2, padx=(10, 0))
+        ctk.CTkLabel(row, text="Media Downloader", font=self.font_normal, anchor="w").grid(
+            row=0, column=1, sticky="ew", padx=10, pady=(8, 0))
+        self._app_row_detail = ctk.CTkLabel(row, text=f"Version {APP_VERSION} - checking for updates...",
+                                             font=self.font_small, anchor="w", text_color="gray60")
+        self._app_row_detail.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 8))
+
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.grid(row=0, column=2, rowspan=2, padx=10)
+        self._app_beta_var = ctk.BooleanVar(value=self.cfg.get("app_update_include_beta", False))
+        ctk.CTkCheckBox(right, text="Beta", font=self.font_small, width=20, checkbox_width=16,
+                        checkbox_height=16, variable=self._app_beta_var,
+                        command=self._on_app_update_beta_changed).pack(side="left", padx=(0, 8))
+        self._app_update_btn = ctk.CTkButton(right, text="Update", width=90, font=self.font_normal,
+                                              command=self._app_update_clicked)
+        self._app_update_btn.pack(side="left")
+        self._app_update_btn.pack_forget()  # hidden until the check finds an update
+
+        threading.Thread(target=self._check_app_update_thread, daemon=True).start()
+
+    def _on_app_update_beta_changed(self):
+        self.cfg["app_update_include_beta"] = bool(self._app_beta_var.get())
+        save_config(self.cfg)
+        if hasattr(self, "_app_row_detail") and self._app_row_detail.winfo_exists():
+            self._app_row_detail.configure(text="Re-checking for updates...")
+            self._app_update_btn.pack_forget()
+        threading.Thread(target=self._check_app_update_thread, daemon=True).start()
+
+    def _check_app_update_thread(self):
+        from core.app_info import APP_VERSION
+        from core import app_update
+        info = app_update.check_app_update(
+            APP_VERSION, include_beta=self.cfg.get("app_update_include_beta", False))
+        self._app_update_info = info
+        self.after(0, lambda: self._apply_app_update_info(info))
+
+    def _apply_app_update_info(self, info):
+        if not (hasattr(self, "_app_row_detail") and self._app_row_detail.winfo_exists()):
+            return
+        self._app_row_detail.configure(text=info.get("detail", ""))
+        self._app_row_dot.configure(text_color="#c0392b" if info.get("update_available") else "#2fa84f")
+        if info.get("update_available"):
+            self._app_update_btn.pack(side="left")
+        else:
+            self._app_update_btn.pack_forget()
+
+    def _app_update_clicked(self):
+        info = getattr(self, "_app_update_info", None)
+        if not info or not info.get("update_available"):
+            messagebox.showinfo("Update", "No update is available right now.")
+            return
+        if not messagebox.askyesno(
+                "Update Media Downloader",
+                f"Download and install version {info['latest']}?\n\n"
+                "Media Downloader will close so the installer can replace it, "
+                "then reopen when the installer finishes."):
+            return
+        threading.Thread(target=self._run_dependency_action,
+                         args=({"name": "Media Downloader", "kind": "app",
+                                "url": info.get("url"), "latest": info.get("latest")},),
+                         daemon=True).start()
+
+    def _do_app_update(self, item):
+        """Shared by the app-row Update button and Update All. Downloads the
+        installer for `item['url']`, launches it, and closes the app so the
+        installer can replace the files. Returns (ok, msg)."""
+        from core import app_update
+        self._threadsafe_log(f"Downloading Media Downloader {item.get('latest', '')}...", color="blue")
+
+        def prog(got, total):
+            self.after(0, lambda: self._set_progress(got / total if total else 0, None))
+
+        path, err = app_update.download_installer(item.get("url"), progress_callback=prog)
+        if err:
+            self._threadsafe_log(err, color="red")
+            return False, err
+        self._threadsafe_log(f"Downloaded to {path}. Launching the installer - "
+                              f"Media Downloader will now close.", color="blue")
+        try:
+            os.startfile(path)  # noqa: S606 - launching our own signed-elsewhere installer
+        except Exception as e:
+            return False, f"Could not start the installer: {e}"
+        # Give the log line a moment to render, then close so files unlock.
+        self.after(1200, self._on_close_requested)
+        return True, f"Installer for {item.get('latest', '')} launched."
+
     def _refresh_dependency_banner(self):
         results = deps.check_all()
         missing = [r["name"] for r in results if not r["ok"] and r["kind"] in ("python", "ffmpeg")]
@@ -3569,6 +4190,22 @@ class App(ctk.CTk):
             self.dep_banner.configure(text=f"Missing dependencies: {', '.join(missing)} - see the Version tab.")
         else:
             self.dep_banner.configure(text="")
+
+    def _get_vlc_clicked(self):
+        """Open the VLC download page. The app deliberately does not
+        download or install VLC itself - the user grabs it from
+        videolan.org (or the Microsoft Store) and the Version tab picks it
+        up on the next re-check."""
+        choice = messagebox.askyesnocancel(
+            "Get VLC",
+            "VLC is a free, open-source media player from VideoLAN.\n\n"
+            "Yes  - open the videolan.org download page\n"
+            "No   - open the Microsoft Store listing\n"
+            "Cancel - do nothing")
+        if choice is True:
+            webbrowser.open(VLC_DOWNLOAD_PAGE)
+        elif choice is False:
+            webbrowser.open(VLC_STORE_PAGE)
 
     def _install_or_update(self, item):
         threading.Thread(target=self._run_dependency_action, args=(item,), daemon=True).start()
@@ -3580,7 +4217,13 @@ class App(ctk.CTk):
         elif item["kind"] == "ffmpeg":
             ok, msg = deps.install_ffmpeg(progress_callback=lambda m: self._threadsafe_log(m))
         elif item["kind"] == "vlc":
-            ok, msg = deps.install_vlc(progress_callback=lambda m: self._threadsafe_log(m))
+            vlc_ok, vlc_path = deps.check_vlc()
+            ok, msg = vlc_ok, (f"VLC detected at {vlc_path}" if vlc_ok
+                               else "VLC isn't installed - get it from videolan.org (optional).")
+        elif item["kind"] == "app":
+            ok, msg = self._do_app_update(item)
+            if ok:
+                return  # the app is closing - no point refreshing the tab
         else:
             ok, msg = False, "Unknown dependency type."
         self._threadsafe_log(msg)
@@ -3605,10 +4248,32 @@ class App(ctk.CTk):
             elif item["kind"] == "ffmpeg":
                 ok, msg = deps.install_ffmpeg(progress_callback=lambda m: self._threadsafe_log(m))
             elif item["kind"] == "vlc":
-                ok, msg = deps.install_vlc(progress_callback=lambda m: self._threadsafe_log(m))
+                vlc_ok, vlc_path = deps.check_vlc()
+                ok, msg = vlc_ok, (f"detected at {vlc_path}" if vlc_ok
+                                   else "not installed (optional - get it from videolan.org)")
             else:
                 ok, msg = False, "Unknown dependency."
             summary.append(f"{item['name']}: {'OK' if ok else 'FAILED'} - {msg}")
+
+        # The app update goes LAST - it launches an external installer and
+        # closes the app, so nothing after it would run. Uses the cached
+        # check from the tab; re-checks if there isn't one.
+        from core.app_info import APP_VERSION
+        from core import app_update
+        info = getattr(self, "_app_update_info", None)
+        if info is None:
+            info = app_update.check_app_update(
+                APP_VERSION, include_beta=self.cfg.get("app_update_include_beta", False))
+        if info.get("update_available"):
+            self.after(0, lambda: self._threadsafe_log("Updating Media Downloader..."))
+            ok, msg = self._do_app_update({"name": "Media Downloader", "kind": "app",
+                                            "url": info.get("url"), "latest": info.get("latest")})
+            summary.append(f"Media Downloader: {'OK' if ok else 'FAILED'} - {msg}")
+            if ok:
+                return  # closing to install
+        else:
+            summary.append(f"Media Downloader: OK - {info.get('detail', 'up to date')}")
+
         full_msg = " | ".join(summary)
         self.after(0, lambda: self._set_inline_status(
             self.dependency_update_status_label, full_msg, "info", clear_after_ms=12000))
@@ -3915,17 +4580,23 @@ class App(ctk.CTk):
     def _on_close_requested(self):
         """Distinguishes a normal user-initiated close (X button / Alt+F4)
         from the app disappearing unexpectedly - so future logs make clear
-        which one happened. Also remembers the current window size AND
-        position (which monitor, and where on it) so the next launch
-        reopens in the same place - first-ever launch, with nothing saved
-        yet, centers instead (see _apply_launch_geometry)."""
+        which one happened. Also remembers the window's last size and
+        whether it was maximized, so a "Remembered" launch restores that
+        (a non-maximized window is re-centered at that size; see
+        _apply_launch_geometry)."""
         from core.startup_log import mark
         self._closing = True  # see the note on this flag in __init__
         try:
-            self.cfg["window_width"] = self.winfo_width()
-            self.cfg["window_height"] = self.winfo_height()
-            self.cfg["window_x"] = self.winfo_x()
-            self.cfg["window_y"] = self.winfo_y()
+            # When maximized, winfo_width/height/x/y report the maximized
+            # rectangle, not a useful floating size - so keep the last
+            # NON-maximized size/position and just flag the maximized state.
+            is_maximized = self.state() == "zoomed"
+            self.cfg["window_maximized"] = is_maximized
+            if not is_maximized:
+                self.cfg["window_width"] = self.winfo_width()
+                self.cfg["window_height"] = self.winfo_height()
+                self.cfg["window_x"] = self.winfo_x()
+                self.cfg["window_y"] = self.winfo_y()
             save_config(self.cfg)
         except Exception:
             pass  # never let saving the size/position block the app from closing
@@ -3988,18 +4659,18 @@ class App(ctk.CTk):
     # developer login that dynamically opens the Developer tab.
     # ================================================================== #
     def _build_more_tab(self, tab):
-        """More has two subtabs: Information (everything that used to
-        just be "the More tab" - disclaimer, dev login, uninstall - now
-        the default landing subtab) and URL Scraping (new)."""
+        """More has two subtabs: URL Scraping (the primary one as of 1.6.0 -
+        first in order and the default landing subtab) and Information
+        (disclaimer, dev login, uninstall)."""
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
         self.more_tabview = ctk.CTkTabview(tab)
         self.more_tabview.grid(row=0, column=0, sticky="nsew")
-        info_tab = self.more_tabview.add("Information")
         scraping_tab = self.more_tabview.add("URL Scraping")
-        self._build_more_information_subtab(info_tab)
+        info_tab = self.more_tabview.add("Information")
         self._build_url_scraping_subtab(scraping_tab)
-        self.more_tabview.set("Information")  # explicit default, even though .add() order already implies it
+        self._build_more_information_subtab(info_tab)
+        self.more_tabview.set("URL Scraping")  # default landing subtab (1.6.0)
 
     def _build_url_scraping_subtab(self, tab):
         tab.grid_columnconfigure(0, weight=1)
@@ -4017,6 +4688,7 @@ class App(ctk.CTk):
         self.scrape_url_entry = ctk.CTkEntry(input_row, placeholder_text="https://... - page to scrape",
                                               font=self.font_normal)
         self.scrape_url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.scrape_url_entry.bind("<Return>", lambda e: self._start_url_scrape())
         self._add_clear_button(input_row, self.scrape_url_entry).grid(row=0, column=1, padx=(0, 8))
         self.scrape_type_var = ctk.StringVar(value="Both")
         ScrollableDropdown(input_row, ["Both", "Video", "Audio"], self.scrape_type_var,
@@ -4056,6 +4728,7 @@ class App(ctk.CTk):
 
         self.scrape_results_frame = ctk.CTkScrollableFrame(tab)
         self.scrape_results_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self._refresh_scrape_results_display()  # show the "No results yet" placeholder from the start
 
     def _start_url_scrape(self):
         url = self.scrape_url_entry.get().strip()
@@ -4066,7 +4739,7 @@ class App(ctk.CTk):
         media_type = {"Both": "both", "Video": "video", "Audio": "audio"}.get(self.scrape_type_var.get(), "both")
         threading.Thread(target=self._run_url_scrape, args=(url, media_type), daemon=True).start()
 
-    def _run_url_scrape(self, url, media_type):
+    def _run_url_scrape(self, url, media_type, offer_install=True):
         from core.url_scraper import scrape_media_urls, fetch_titles_for_urls
 
         def log(msg):
@@ -4084,8 +4757,18 @@ class App(ctk.CTk):
             # automatically retry) instead of just dumping that raw
             # text at the user, per how this was specifically asked for
             # after the reported "executable is not found" bug.
-            if "Executable doesn't exist" in error_text or "playwright install" in error_text:
+            missing_browser = "Executable doesn't exist" in error_text or "playwright install" in error_text
+            if missing_browser and offer_install:
                 self.after(0, lambda: self._offer_playwright_install_and_retry(url, media_type))
+            elif missing_browser:
+                # Already went through the install flow once this attempt -
+                # don't loop back into the same popup. Show a plain error.
+                self.after(0, lambda: messagebox.showerror(
+                    "URL Scraping unavailable",
+                    "The browser component still isn't working after installing it.\n\n"
+                    "Try restarting the app. If it keeps failing, you can reinstall it "
+                    "from a command prompt with:  playwright install chromium"))
+                self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
             else:
                 self.after(0, lambda: messagebox.showerror("Scrape failed", error_text))
                 self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
@@ -4121,7 +4804,9 @@ class App(ctk.CTk):
         if ok:
             self.after(0, lambda: self.scrape_status_label.configure(
                 text="Browser installed - retrying...", text_color="#2fa84f"))
-            self._run_url_scrape(url, media_type)
+            # offer_install=False: if the retry STILL can't find the browser,
+            # surface a plain error instead of looping back to this popup.
+            self._run_url_scrape(url, media_type, offer_install=False)
         else:
             self.after(0, lambda: messagebox.showerror("Install failed", message))
             self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
@@ -4259,6 +4944,7 @@ class App(ctk.CTk):
         self.dev_user_entry = ctk.CTkEntry(dev_user_row, placeholder_text="Username",
                                             font=self.font_normal, width=250)
         self.dev_user_entry.pack(side="left")
+        self.dev_user_entry.bind("<Return>", lambda e: self._dev_login_clicked())
         self._add_clear_button(dev_user_row, self.dev_user_entry).pack(side="left", padx=(6, 0))
 
         dev_pass_row = ctk.CTkFrame(self._dev_login_area, fg_color="transparent")
@@ -4536,6 +5222,10 @@ class App(ctk.CTk):
         self.cfg["background_downloads_enabled"] = self.background_downloads_var.get()
         save_config(self.cfg)
 
+    def _on_batch_prefetch_sizes_changed(self):
+        self.cfg["batch_prefetch_sizes"] = self.batch_prefetch_sizes_var.get()
+        save_config(self.cfg)
+
     def _on_scroll_speed_changed(self, value):
         ms = int(value)
         self.cfg["scroll_speed_ms"] = ms
@@ -4612,6 +5302,10 @@ class App(ctk.CTk):
         dirs = self.cfg.get("media_library_directories", [])
         if directory in dirs:
             dirs.remove(directory)
+            # If they removed the auto-added download folder, remember that
+            # so _ensure_download_root_in_library doesn't put it back.
+            if directory == self.cfg.get("download_root"):
+                self.cfg["media_library_download_root_optout"] = True
             save_config(self.cfg)
         self._refresh_library_dirs_list()
 

@@ -5,6 +5,7 @@ gui/app.py is already large - these functions take the running App
 instance as their first argument rather than duplicating its state.
 """
 import os
+import stat
 import threading
 import datetime
 import time
@@ -42,15 +43,28 @@ def _first_title(req):
     return next(iter(req["items"].keys()), "(no items)")
 
 
+def _file_size_or_none(path):
+    """Size of the file at `path`, or None if it isn't a regular file.
+    One os.stat instead of the isfile()+getsize() pair (two stat calls)
+    this used to do everywhere - the detail view renders these a lot."""
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):  # ValueError: embedded NUL in path (matches genericpath.isfile)
+        return None
+    return st.st_size if stat.S_ISREG(st.st_mode) else None
+
+
 def _total_size(req):
     """Sum of every successfully-downloaded item's file size, or None if
     nothing in the request has a real file on disk yet."""
     total = 0
     found_any = False
     for item in req["items"].values():
-        path = item.get("path")
-        if path and os.path.isfile(path):
-            total += os.path.getsize(path)
+        size = _file_size_or_none(item.get("path"))
+        if size is not None:
+            total += size
             found_any = True
     return total if found_any else None
 
@@ -115,8 +129,53 @@ def _request_display_parts(req, mode):
 def build_request_history_section(app, parent):
     """Builds the mode dropdown + scrollable request list into `parent`.
     Returns a refresh() function - call it any time requests change
-    (after a download finishes, after a delete, etc)."""
-    header = ctk.CTkFrame(parent, fg_color="transparent")
+    (after a download finishes, after a delete, etc).
+
+    `parent` holds two sibling frames: the list view (everything below)
+    and an initially-hidden detail view. Clicking "View" on a request
+    hides the list view and builds the request's drill-down INTO the
+    detail view with a "<- Back" button - an in-app page swap, not a
+    pop-up Toplevel. Back (or Escape) swaps them back and refreshes the
+    list so it reflects anything that changed while the detail was open."""
+    list_view = ctk.CTkFrame(parent, fg_color="transparent")
+    list_view.pack(fill="both", expand=True)
+    detail_view = ctk.CTkFrame(parent, fg_color="transparent")
+    # detail_view is packed only while a request detail is showing.
+
+    def show_detail(request_id):
+        if not (list_view.winfo_exists() and detail_view.winfo_exists()):
+            return
+        if detail_view.winfo_ismapped():
+            return  # already showing a detail page (e.g. a double-click on View)
+        if get_request(request_id) is None:
+            messagebox.showinfo("Not found", "That request no longer exists (it may have been deleted).")
+            refresh()
+            return
+        list_view.pack_forget()
+        detail_view.pack(fill="both", expand=True)
+        _render_request_detail(app, detail_view, request_id,
+                               list_refresh=refresh, back_callback=show_list)
+
+    def show_list():
+        # Any retry thread still holding an old page's render closure will
+        # now dispatch to nothing (see render() in _render_request_detail).
+        app._request_detail_render = None
+        if detail_view.winfo_exists():
+            for w in detail_view.winfo_children():
+                w.destroy()
+            detail_view.pack_forget()
+        if list_view.winfo_exists():
+            list_view.pack(fill="both", expand=True)
+            refresh()
+
+    def _on_escape(_event=None):
+        # One app-lifetime binding; a no-op unless the detail page is the
+        # thing currently on screen, so it never fights other keybinds.
+        if detail_view.winfo_exists() and detail_view.winfo_ismapped():
+            show_list()
+    app.bind("<Escape>", _on_escape, add="+")
+
+    header = ctk.CTkFrame(list_view, fg_color="transparent")
     header.pack(fill="x", pady=(0, 8))
     ctk.CTkLabel(header, text="Request History", font=app.font_label).pack(side="left")
     ctk.CTkLabel(header, text="Display mode:", font=app.font_small, text_color="gray60").pack(
@@ -172,12 +231,13 @@ def build_request_history_section(app, parent):
                   command=lambda: retry_all_clicked()).pack(side="right", padx=(0, 8))
 
     # --- Search + filter/sort row ---
-    filter_row = ctk.CTkFrame(parent, fg_color="transparent")
+    filter_row = ctk.CTkFrame(list_view, fg_color="transparent")
     filter_row.pack(fill="x", pady=(0, 8))
     search_var = ctk.StringVar(value="")
     search_entry = ctk.CTkEntry(filter_row, textvariable=search_var, font=app.font_normal,
                                  placeholder_text="Search request names...")
     search_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+    search_entry.bind("<Return>", lambda e: refresh())
     app._add_search_clear_button(search_entry, search_var)
     search_var.trace_add(
         "write", lambda *_: app._debounced_call("_request_history_search_after_id", 300, refresh))
@@ -192,7 +252,7 @@ def build_request_history_section(app, parent):
     ScrollableDropdown(filter_row, TYPE_FILTERS, type_var, font=app.font_small, width=110,
                         command=lambda _v: refresh()).pack(side="left")
 
-    list_frame = ctk.CTkScrollableFrame(parent, height=280)
+    list_frame = ctk.CTkScrollableFrame(list_view, height=280)
     list_frame.pack(fill="both", expand=True)
 
     def refresh():
@@ -245,13 +305,13 @@ def build_request_history_section(app, parent):
         in_progress_ids = {r["request_id"] for r in in_progress}
         for req in all_requests:
             status_key = "in_progress" if req["request_id"] in in_progress_ids else req.get("overall", "failed")
-            _build_request_row(app, list_frame, req, status_key, mode_var.get(), refresh)
+            _build_request_row(app, list_frame, req, status_key, mode_var.get(), refresh, show_detail)
 
     refresh()
     return refresh
 
 
-def _build_request_row(app, parent, req, status_key, mode, refresh_callback):
+def _build_request_row(app, parent, req, status_key, mode, refresh_callback, show_detail):
     row = ctk.CTkFrame(parent)
     row.pack(fill="x", pady=3, padx=2)
     row.grid_columnconfigure(1, weight=1)
@@ -279,12 +339,47 @@ def _build_request_row(app, parent, req, status_key, mode, refresh_callback):
 
     btns = ctk.CTkFrame(row, fg_color="transparent")
     btns.grid(row=0, column=2, padx=10)
+    failed_urls = [u for u, it in req.get("items", {}).items() if it.get("status") == "failed"]
+    if failed_urls:
+        ctk.CTkButton(btns, text=f"Retry failed ({len(failed_urls)})", width=125, font=app.font_small,
+                      command=lambda r=req, fu=list(failed_urls):
+                          _retry_request_failed(app, r, fu, refresh_callback)
+                      ).pack(side="left", padx=(0, 6))
     ctk.CTkButton(btns, text="View", width=70, font=app.font_small,
-                  command=lambda r=req: open_request_detail(app, r["request_id"], refresh_callback)
+                  command=lambda r=req: show_detail(r["request_id"])
                   ).pack(side="left", padx=(0, 6))
     ctk.CTkButton(btns, text="Delete", width=70, font=app.font_small, fg_color="#a13333", hover_color="#7d2626",
                   command=lambda r=req: _delete_request_clicked(r["request_id"], refresh_callback)
                   ).pack(side="left")
+
+
+def _retry_request_failed(app, req, failed_urls, refresh_callback):
+    """Retry only the failed items of ONE request. The queue counter
+    resumes from the number of items in this request that already
+    succeeded (so a 20-item request with 6 done shows "Retry 7/20"
+    onward), not from 1."""
+    if _download_busy(app):
+        messagebox.showinfo("Download in progress",
+                            "Wait for the current download to finish before retrying.")
+        return
+    if not failed_urls:
+        messagebox.showinfo("Retry failed", "Nothing failed in this request.")
+        return
+    if not messagebox.askyesno("Retry failed",
+                               f"Retry {len(failed_urls)} failed item(s) in this request?"):
+        return
+    request_id = req["request_id"]
+    items = req.get("items", {})
+    total = len(items)
+    already_done = sum(1 for it in items.values() if it.get("status") == "success")
+    for u in failed_urls:
+        reopen_for_retry(request_id, u)
+    refresh_callback()
+    threading.Thread(
+        target=_retry_all_thread,
+        args=(app, [(request_id, u) for u in failed_urls], refresh_callback),
+        kwargs={"counter_base": already_done, "counter_total": total},
+        daemon=True).start()
 
 
 def _delete_request_clicked(request_id, refresh_callback):
@@ -294,84 +389,166 @@ def _delete_request_clicked(request_id, refresh_callback):
         refresh_callback()
 
 
-def open_request_detail(app, request_id, parent_refresh_callback):
-    """The per-request drill-down: every URL in the request, its status
-    dot, and Copy Link / Retry buttons per URL."""
+def _render_request_detail(app, container, request_id, list_refresh, back_callback):
+    """The per-request drill-down, rendered as an in-app page INTO
+    `container` (the section's hidden detail frame) rather than a pop-up
+    Toplevel: every URL in the request, its status dot, Copy Link /
+    Retry per URL, an editable title, and the multi-select toolbar - with
+    a "<- Back" button at the top that returns to the list view.
+
+    `list_refresh` rebuilds the request list; `back_callback` returns to
+    it (also called on Escape, wired once by build_request_history_section).
+    """
+    for w in container.winfo_children():
+        w.destroy()
+
     req = get_request(request_id)
     if not req:
         messagebox.showinfo("Not found", "That request no longer exists (it may have been deleted).")
-        parent_refresh_callback()
+        back_callback()
         return
 
-    win = ctk.CTkToplevel(app)
-    win.title(f"Request: {request_id}")
-    win.geometry("640x480")
-    win.grab_set()
+    # --- top bar: Back + editable title ---
+    top_row = ctk.CTkFrame(container, fg_color="transparent")
+    top_row.pack(fill="x", padx=15, pady=(15, 2))
+    ctk.CTkButton(top_row, text="← Back", width=80, font=app.font_small, fg_color="gray40",
+                  hover_color="gray30", command=lambda: back_callback()).pack(side="left", padx=(0, 12))
 
-    title_row = ctk.CTkFrame(win, fg_color="transparent")
-    title_row.pack(fill="x", padx=15, pady=(15, 2))
+    title_row = ctk.CTkFrame(top_row, fg_color="transparent")
+    title_row.pack(side="left", fill="x", expand=True)
     # The name shown here is the request's own display name (its custom
     # name if renamed, otherwise the first downloaded item's title,
     # never the raw internal request_id) - per how this was asked for.
-    display_name = req.get("custom_name") or _first_title(req)
-    name_label = ctk.CTkLabel(title_row, text=display_name, font=app.font_label, anchor="w")
+    name_label = ctk.CTkLabel(title_row, text=req.get("custom_name") or _first_title(req),
+                              font=app.font_label, anchor="w")
     name_label.pack(side="left", fill="x", expand=True)
     rename_entry = ctk.CTkEntry(title_row, font=app.font_label)
+    subtitle_label = ctk.CTkLabel(container, text="", font=app.font_small, text_color="gray60")
+    subtitle_label.pack(anchor="w", padx=15)
+
+    def _refresh_header(current):
+        """Update the title + subtitle from `current` in place - no
+        window teardown/rebuild (this is an embedded page now)."""
+        if not name_label.winfo_exists():
+            return
+        name_label.configure(text=current.get("custom_name") or _first_title(current))
+        elapsed = current.get("elapsed_seconds")
+        subtitle = f"{request_id} - {current['dtype']} {current['mode']} - {len(current['items'])} item(s)"
+        if elapsed:
+            subtitle += f" - took {elapsed:.1f}s total"
+        size_bytes = _total_size(current)
+        if size_bytes is not None:
+            subtitle += f" - {format_file_size(size_bytes)} total"
+        subtitle_label.configure(text=subtitle)
 
     def start_rename():
         name_label.pack_forget()
         rename_btn.pack_forget()
         rename_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         rename_entry.delete(0, "end")
-        rename_entry.insert(0, display_name)
+        rename_entry.insert(0, name_label.cget("text"))
         rename_entry.focus_set()
         save_btn.pack(side="left")
+
+    def _end_rename():
+        rename_entry.pack_forget()
+        save_btn.pack_forget()
+        name_label.pack(side="left", fill="x", expand=True)
+        rename_btn.pack(side="left")
 
     def save_rename():
         new_name = rename_entry.get().strip()
         rename_request(request_id, new_name)
-        win.destroy()
-        parent_refresh_callback()
-        open_request_detail(app, request_id, parent_refresh_callback)  # reopen with the fresh name
+        _end_rename()
+        current = get_request(request_id) or req
+        _refresh_header(current)   # update in place, no reopen
+        list_refresh()
 
     rename_btn = ctk.CTkButton(title_row, text="Rename", width=70, font=app.font_small, fg_color="gray40",
                                 hover_color="gray30", command=start_rename)
     rename_btn.pack(side="left")
     save_btn = ctk.CTkButton(title_row, text="Save", width=60, font=app.font_small, command=save_rename)
     rename_entry.bind("<Return>", lambda e: save_rename())
-    elapsed = req.get("elapsed_seconds")
-    subtitle = f"{request_id} - {req['dtype']} {req['mode']} - {len(req['items'])} item(s)"
-    if elapsed:
-        subtitle += f" - took {elapsed:.1f}s total"
-    size_bytes = _total_size(req)
-    if size_bytes is not None:
-        subtitle += f" - {format_file_size(size_bytes)} total"
-    ctk.CTkLabel(win, text=subtitle, font=app.font_small, text_color="gray60").pack(anchor="w", padx=15)
 
-    # Advanced Selecting for this request's URLs - replaces the
-    # always-visible per-URL Copy Link/Retry buttons: with selecting
-    # off, each row keeps its own Copy Link/Retry (nothing changes for
-    # a single quick action); turning it on reveals a checkbox per URL
-    # plus Select All / bulk Copy Selected / bulk Retry Selected here.
+    def _cancel_rename(_e=None):
+        _end_rename()
+        return "break"  # don't let this Escape also bubble to the page-level Back
+    rename_entry.bind("<Escape>", _cancel_rename)
+
+    _refresh_header(req)
+
+    # Advanced Selecting for this request's URLs - built ONCE here and
+    # reused across every re-render (a retry finishing, a checkbox
+    # toggling); render() below only rebuilds the per-URL rows, never
+    # this toolbar or the selector instance.
     from gui.advanced_select import AdvancedSelector, build_selection_toolbar
     item_selector = AdvancedSelector()
-    select_toolbar = ctk.CTkFrame(win, fg_color="transparent")
+    select_toolbar = ctk.CTkFrame(container, fg_color="transparent")
     select_toolbar.pack(fill="x", padx=15, pady=(8, 0))
 
-    list_frame = ctk.CTkScrollableFrame(win)
+    list_frame = ctk.CTkScrollableFrame(container)
     list_frame.pack(fill="both", expand=True, padx=15, pady=15)
 
-    def render():
+    # url -> (row_frame, signature). A row is only destroyed + rebuilt
+    # when its own item actually changed (status/path/name/error) or the
+    # selection state affecting it changed - an unchanged row survives a
+    # re-render untouched, so a retry finishing on item 3 of 20 no longer
+    # rebuilds the other 19.
+    row_cache = {}
+
+    def _do_render():
         if not list_frame.winfo_exists():
-            return  # the detail window was closed before this refresh fired
-                     # (e.g. a retry finished after the user closed it) -
-                     # nothing to update, and nothing should crash over it.
-        for w in list_frame.winfo_children():
-            w.destroy()
+            return  # user hit Back before this refresh fired - no-op, no crash
+        # Fall back to the last-known request dict if it's since been
+        # deleted - render stays silent (matches the old Toplevel), the
+        # "no longer exists" notice only fires on the initial open.
         current = get_request(request_id) or req
-        for url, item in current["items"].items():
-            _build_item_row(app, list_frame, request_id, url, item, render, parent_refresh_callback,
-                            item_selector)
+        _refresh_header(current)
+        selecting = item_selector.enabled
+        items = current["items"]
+
+        for url in list(row_cache):
+            if url not in items:
+                row_cache[url][0].destroy()
+                del row_cache[url]
+
+        ordered = []
+        for url, item in items.items():
+            sig = (item.get("status"), item.get("path"), item.get("name"), item.get("error"),
+                   selecting, selecting and item_selector.is_selected(url))
+            cached = row_cache.get(url)
+            if cached is not None and cached[1] == sig and cached[0].winfo_exists():
+                ordered.append(cached[0])
+                continue
+            if cached is not None:
+                cached[0].destroy()
+            frame = _build_item_row(app, list_frame, request_id, url, item, render,
+                                    list_refresh, item_selector)
+            row_cache[url] = (frame, sig)
+            ordered.append(frame)
+
+        # A rebuilt middle row is re-packed at the end of the frame by
+        # _build_item_row; restore the request's real item order so a
+        # retry finishing on item 3 doesn't shuffle it to the bottom.
+        for i, frame in enumerate(ordered):
+            if i == 0:
+                frame.pack_configure(side="top", fill="x", pady=3)
+            else:
+                frame.pack_configure(side="top", fill="x", pady=3, after=ordered[i - 1])
+
+    # The debounce slot lives on `app` and is shared, so a retry thread that
+    # captured an OLD page's `render` (then the user hit Back and re-opened
+    # the request) must not cancel or drive the live page. Dispatch through
+    # this pointer, which show_list() nulls and each _render_request_detail
+    # sets to its own _do_render - so a stale render() is a harmless no-op
+    # and a live one always hits the current page.
+    app._request_detail_render = _do_render
+
+    def render():
+        # Coalesce bursts (worker threads fire this per retried item via
+        # app.after) into one rebuild, same pattern as _refresh_history_tab.
+        app._debounced_call("_request_detail_render_after_id", 120,
+                            lambda: (getattr(app, "_request_detail_render", None) or (lambda: None))())
 
     def copy_selected():
         selected = item_selector.selected_ids()
@@ -410,7 +587,7 @@ def open_request_detail(app, request_id, parent_refresh_callback):
         render()
     item_selector.on_change = combined_on_change
 
-    render()
+    _do_render()
 
 
 def _build_item_row(app, parent, request_id, url, item, render_callback, parent_refresh_callback, item_selector=None):
@@ -434,8 +611,9 @@ def _build_item_row(app, parent, request_id, url, item, render_callback, parent_
     ctk.CTkLabel(row, text=name, font=app.font_normal, anchor="w").grid(row=0, column=col + 1, sticky="w", pady=(8, 0))
     detail = url
     size_str = None
-    if item.get("path") and os.path.isfile(item["path"]):
-        size_str = format_file_size(os.path.getsize(item["path"]))
+    _size = _file_size_or_none(item.get("path"))
+    if _size is not None:
+        size_str = format_file_size(_size)
     if item.get("error"):
         detail += f"  -  {item['error']}"
     elif item.get("path"):
@@ -452,12 +630,17 @@ def _build_item_row(app, parent, request_id, url, item, render_callback, parent_
     btns.grid(row=0, column=col + 2, rowspan=2, padx=10)
     ctk.CTkButton(btns, text="Copy Link", width=85, font=app.font_small, fg_color="gray40", hover_color="gray30",
                   command=lambda u=url: _copy_link(app, u)).pack(side="left", padx=(0, 6))
-    retry_btn = ctk.CTkButton(btns, text="Retry", width=65, font=app.font_small,
+    # For a successful item the button becomes "Redownload" (still
+    # enabled) - the common reason to want it is that the file was
+    # deleted; it fetches again into the request's original out_dir,
+    # exactly like a retry.
+    is_success = status == "success"
+    retry_btn = ctk.CTkButton(btns, text="Redownload" if is_success else "Retry",
+                               width=90 if is_success else 65, font=app.font_small,
                                command=lambda u=url: _retry_url(app, request_id, u, render_callback,
                                                                  parent_refresh_callback, retry_btn))
     retry_btn.pack(side="left")
-    if status == "success":
-        retry_btn.configure(state="disabled")
+    return row
 
 
 def _copy_link(app, url):
@@ -593,16 +776,27 @@ def _retry_url_thread(app, request_id, url, render_callback, parent_refresh_call
     app.after(0, app._refresh_history_tab)
 
 
-def _retry_all_thread(app, pairs, refresh_callback):
+def _retry_all_thread(app, pairs, refresh_callback, counter_base=0, counter_total=None):
     """Retries every given (request_id, url) pair one at a time, in the
     background - sequential rather than all-at-once, same reasoning as
     the batch-delay setting elsewhere: not hammering a site (or the
-    user's own connection) with a burst of simultaneous requests."""
+    user's own connection) with a burst of simultaneous requests.
+
+    The queue counter shown in the log/progress row starts at
+    counter_base + 1 and runs to counter_total. For a per-request
+    "Retry failed", the caller passes counter_base = how many items in
+    that request already succeeded and counter_total = the request's
+    total item count, so it reads e.g. "Retry 7/20" - it picks up where
+    the original run left off rather than restarting from 1."""
     delay_s = max(0, app.cfg.get("batch_delay_seconds", 3))
     total = len(pairs)
+    grand_total = counter_total if counter_total is not None else total
     app.after(0, lambda: app._set_downloading_state(True))
     try:
         for i, (request_id, url) in enumerate(pairs, start=1):
+            n = counter_base + i
+            app.after(0, lambda n=n, gt=grand_total:
+                      app.queue_progress_label.configure(text=f"Retry {n}/{gt}"))
             _do_retry_download(app, request_id, url, manage_ui_state=False)
             app.after(0, refresh_callback)
             app.after(0, app._refresh_history_tab)
@@ -619,4 +813,5 @@ def _retry_all_thread(app, pairs, refresh_callback):
                     waited += 0.25
     finally:
         app.after(0, lambda: app._set_downloading_state(False))
-    app.after(0, lambda: app._threadsafe_log(f"Retry All finished ({total} item(s))."))
+        app.after(0, lambda: app.queue_progress_label.configure(text=""))
+    app.after(0, lambda: app._threadsafe_log(f"Retry finished ({total} item(s))."))

@@ -70,7 +70,8 @@ def open_in_vlc(path):
         return False, f"Path not found: {path}"
     vlc_path = find_vlc()
     if not vlc_path:
-        return False, "VLC isn't installed. Use the Version tab to install it."
+        return False, ("VLC isn't installed. Get it from the Version tab "
+                       "or https://www.videolan.org/vlc/")
     try:
         subprocess.Popen([vlc_path, "--no-one-instance", "--no-playlist-enqueue", path])
         return True, "Opened in VLC."

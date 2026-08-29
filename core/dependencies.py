@@ -1,15 +1,16 @@
 """
 Dependency detection + installation.
 
-Handles three kinds of dependency:
+Handles these kinds of dependency:
   - PYTHON packages (customtkinter, yt-dlp, pillow) -> checked via import,
     installed via `pip install`.
   - FFMPEG -> not on PATH by default on most Windows machines. We download
     a static build and drop ffmpeg.exe/ffprobe.exe into <app_dir>/ffmpeg/bin
     so nothing needs admin rights or a PATH edit. yt-dlp is then told where
     to find it via ffmpeg_location.
-  - VLC -> checked via common install paths / Windows registry. Installed
-    via VLC's official silent installer switches.
+  - VLC -> detection only (common install paths / Windows registry). The
+    app never downloads or installs VLC; the Version tab just links out to
+    videolan.org when it's missing.
 
 Every check/install function returns (ok: bool, message: str) so the GUI can
 show the user exactly what happened instead of failing silently.
@@ -22,7 +23,6 @@ import platform
 import shutil
 import subprocess
 import sys
-import time
 import urllib.request
 import zipfile
 
@@ -34,11 +34,7 @@ FFPROBE_EXE = os.path.join(FFMPEG_DIR, "ffprobe.exe" if platform.system() == "Wi
 
 FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
-WINDOWS_VLC_PATHS = [
-    r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-    r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
-]
-VLC_DOWNLOAD_URL = "https://get.videolan.org/vlc/last/win64/vlc-win64.exe"
+_ffmpeg_check_cache = None   # (ok, path) once resolved; cleared by invalidate_ffmpeg_cache()
 
 PIP_PACKAGES = {
     "customtkinter": "customtkinter>=5.2.0",
@@ -102,6 +98,15 @@ def check_ffmpeg():
     app's own executable (see install_dir() and installer.iss's
     vendor\\ffmpeg [Files] entry - avoids needing every user to download
     it separately on first run), then finally the system PATH."""
+    global _ffmpeg_check_cache
+    if _ffmpeg_check_cache is not None:
+        return _ffmpeg_check_cache
+    result = _resolve_ffmpeg()
+    _ffmpeg_check_cache = result
+    return result
+
+
+def _resolve_ffmpeg():
     if os.path.exists(FFMPEG_EXE):
         return True, FFMPEG_EXE
     from core.paths import install_dir
@@ -113,6 +118,13 @@ def check_ffmpeg():
     if found:
         return True, found
     return False, None
+
+
+def invalidate_ffmpeg_cache():
+    """Drop the cached check_ffmpeg() result - call after installing FFmpeg
+    or when the Version tab re-checks dependency status."""
+    global _ffmpeg_check_cache
+    _ffmpeg_check_cache = None
 
 
 def install_ffmpeg(progress_callback=None):
@@ -143,6 +155,7 @@ def install_ffmpeg(progress_callback=None):
     except Exception as e:
         return False, f"FFmpeg extraction failed: {e}"
 
+    invalidate_ffmpeg_cache()
     ok, path = check_ffmpeg()
     if ok:
         return True, f"FFmpeg installed to {FFMPEG_DIR}"
@@ -150,9 +163,20 @@ def install_ffmpeg(progress_callback=None):
 
 
 # --------------------------------------------------------------------- #
-# VLC
+# VLC  (detection only - the app never downloads or installs VLC)
 # --------------------------------------------------------------------- #
+WINDOWS_VLC_PATHS = [
+    r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+    r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+]
+
+
 def find_vlc():
+    """Return the path to vlc.exe if VLC is installed, else None. Checks
+    the system PATH first, then (on Windows) the standard install
+    locations and the VideoLAN registry key. Detection only - when VLC is
+    missing the app points the user at videolan.org rather than
+    installing it."""
     on_path = shutil.which("vlc")
     if on_path:
         return on_path
@@ -160,74 +184,36 @@ def find_vlc():
         for p in WINDOWS_VLC_PATHS:
             if os.path.exists(p):
                 return p
+        try:
+            import winreg
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for subkey in (r"SOFTWARE\VideoLAN\VLC",
+                               r"SOFTWARE\WOW6432Node\VideoLAN\VLC"):
+                    try:
+                        with winreg.OpenKey(hive, subkey) as key:
+                            install_dir = winreg.QueryValueEx(key, "InstallDir")[0]
+                    except OSError:
+                        continue
+                    candidate = os.path.join(install_dir, "vlc.exe")
+                    if os.path.exists(candidate):
+                        return candidate
+        except Exception:
+            pass
     return None
 
 
 def check_vlc():
+    """(ok, path_or_None). VLC is optional - only used by the app's
+    'Open in VLC' buttons."""
     path = find_vlc()
     return (path is not None), path
-
-
-def install_vlc(progress_callback=None):
-    def log(msg):
-        if progress_callback:
-            progress_callback(msg)
-
-    if platform.system() != "Windows":
-        return False, "Automatic VLC install is only implemented for Windows. Get it from videolan.org."
-
-    log("Downloading VLC installer...")
-    last_error = None
-    data = None
-    # get.videolan.org occasionally returns a transient server error (HTTP
-    # 500) rather than the file - retry a couple of times before giving up,
-    # since it's usually momentary rather than a real outage.
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(VLC_DOWNLOAD_URL, timeout=90) as resp:
-                data = resp.read()
-            break
-        except Exception as e:
-            last_error = e
-            if attempt < 2:
-                log(f"Download attempt {attempt + 1} failed ({e}), retrying...")
-                time.sleep(2)
-    if data is None:
-        return False, (
-            f"VLC download failed after 3 attempts: {last_error}\n\n"
-            "This is usually a temporary problem on VideoLAN's download "
-            "server, not something wrong with this app - try again in a "
-            "few minutes, or download and install it yourself from "
-            "https://www.videolan.org/vlc/"
-        )
-
-    installer_path = os.path.join(app_dir(), "vlc_setup_temp.exe")
-    try:
-        with open(installer_path, "wb") as f:
-            f.write(data)
-    except Exception as e:
-        return False, f"Could not save VLC installer: {e}"
-
-    log("Installing VLC quietly (this can take a minute)...")
-    try:
-        subprocess.run([installer_path, "/L=1033", "/S"], timeout=300)
-    except Exception as e:
-        return False, f"VLC install failed: {e}"
-    finally:
-        try:
-            os.remove(installer_path)
-        except OSError:
-            pass
-
-    if find_vlc():
-        return True, "VLC installed successfully."
-    return False, "Installer ran but VLC still wasn't found. It may need a manual install from videolan.org."
 
 
 # --------------------------------------------------------------------- #
 # Aggregate status for the Version tab
 # --------------------------------------------------------------------- #
 def check_all():
+    invalidate_ffmpeg_cache()
     results = []
 
     for key, spec in PIP_PACKAGES.items():
@@ -257,7 +243,7 @@ def check_all():
         "kind": "vlc",
         "pip_spec": None,
         "ok": vlc_ok,
-        "detail": f"Found: {vlc_path}" if vlc_ok else "Not installed (optional, used by 'Open in VLC')",
+        "detail": f"Found: {vlc_path}" if vlc_ok else "Not installed (optional - used by the 'Open in VLC' buttons)",
     })
 
     return results

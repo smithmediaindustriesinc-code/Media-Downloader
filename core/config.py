@@ -5,6 +5,7 @@ from core.paths import app_dir
 CONFIG_PATH = os.path.join(app_dir(), "options", "config.json")
 
 DEFAULT_CONFIG = {
+    "schema_version": 1,   # bumped whenever a migration is added to _MIGRATIONS below
     "download_root": "",   # chosen default folder; Videos/ and Music/ live under it
     "video_path": "",
     "music_path": "",
@@ -28,11 +29,16 @@ DEFAULT_CONFIG = {
                             # brand new install starts with (first-ever
                             # launch size), and get overwritten on every
                             # normal close after that.
-    "window_x": None,      # position (which monitor + where on it) the
-    "window_y": None,      # window was last closed at. None on a fresh
-                            # install = center on the primary monitor
-                            # instead of using a possibly-invalid position.
-    "launch_resolution": "Remembered",  # "Remembered" = use window_width/
+    "window_x": None,      # last non-maximized position. Kept for the
+    "window_y": None,      # settings-migration path; as of 1.6.0 a
+                            # "Remembered" launch re-centers at the saved
+                            # size rather than restoring this position.
+    "window_maximized": False,  # was the window maximized at last close?
+                            # A "Remembered" launch restores state("zoomed")
+                            # from this; see gui/app.py _apply_launch_geometry
+                            # / _on_close_requested. This is what fixes
+                            # "remember last fullscreen" not sticking.
+    "launch_resolution": "Fullscreen",  # "Fullscreen" = a true maximized window (default). "Remembered" = use window_width/
                             # height/x/y above. Otherwise one of the
                             # preset sizes computed from the primary
                             # monitor (see RESOLUTION_PRESETS in
@@ -67,6 +73,11 @@ DEFAULT_CONFIG = {
                             # failed item from Request History always
                             # bypasses this check regardless of this
                             # setting - a retry is a deliberate re-attempt.
+    "media_library_download_root_optout": False,  # the default download
+                            # folder is auto-added to the Media Library
+                            # (see gui/app.py _ensure_download_root_in_library);
+                            # this flips True if the user removes it, so it
+                            # isn't re-added on the next launch.
     "media_library_directories": [],  # folders the Media tab's Library
                             # subtab is allowed to scan - empty by
                             # default (nothing until the user configures
@@ -99,12 +110,65 @@ DEFAULT_CONFIG = {
                             # change (every tab switch takes visibly
                             # longer), not something to force on anyone.
     "loading_delay_ms": 500,
-    "dynamic_batch_queue_enabled": False,  # Advanced > Batch Queue -
+    "dynamic_batch_queue_enabled": True,  # Advanced > Batch Queue -
                             # when on, the plain textbox is replaced by
                             # a scrollable list of individually-
                             # removable URL rows with undo support (see
-                            # gui/app.py's _refresh_batch_dynamic_list).
+                            # gui/app.py's _refresh_batch_dynamic_list). On by default as of 1.6.0.
+    "save_download_info": True,  # Download tab toggle - when off, a
+                            # download is NOT recorded to Request History
+                            # or the History tab (core.download_requests /
+                            # core.history recording is switched off). On
+                            # by default. Added 1.6.4.
+    "batch_prefetch_sizes": False,  # Advanced Settings toggle - when on,
+                            # a batch/playlist download first runs a pass
+                            # that fetches ONLY each item's file size
+                            # (nothing else), and the queue + per-item
+                            # ETAs then become size-based (remaining bytes
+                            # / rolling avg speed) instead of
+                            # item-count-based. OFF by default = exactly
+                            # the pre-1.6.8 behaviour. Added 1.6.8.
+    "app_update_include_beta": False,  # Version tab - when on, the in-app
+                            # update check also offers preview/beta builds,
+                            # not just the latest stable release. Off by
+                            # default. Added 1.6.10.
 }
+
+
+# Current schema version - keep equal to DEFAULT_CONFIG["schema_version"].
+CONFIG_SCHEMA_VERSION = DEFAULT_CONFIG["schema_version"]
+
+# Numbered migrations. Each key N is a function that takes the config dict at
+# schema version N-1 and mutates/returns it at version N. Add one whenever a
+# setting is renamed, its shape changes, or an old value needs rewriting -
+# so upgrades are explicit and testable rather than guessed at.
+# Example (do not add unless real):
+#   def _migrate_to_2(cfg):
+#       cfg["new_name"] = cfg.pop("old_name", DEFAULT_CONFIG["new_name"])
+#       return cfg
+_MIGRATIONS = {
+    # 2: _migrate_to_2,
+}
+
+
+def _run_migrations(cfg):
+    """Steps cfg from its stored schema_version up to CONFIG_SCHEMA_VERSION,
+    applying each numbered migration in order. Unknown/absent schema_version
+    is treated as the current version for a config that already has all the
+    current keys, or as 1 otherwise - i.e. we never run migrations that
+    would corrupt a config that predates versioning but is otherwise fine."""
+    current = cfg.get("schema_version")
+    if not isinstance(current, int) or current < 1:
+        current = 1
+    for target in range(current + 1, CONFIG_SCHEMA_VERSION + 1):
+        migrate = _MIGRATIONS.get(target)
+        if migrate:
+            try:
+                cfg = migrate(cfg) or cfg
+            except Exception:
+                pass  # a failed migration must not brick startup
+    cfg["schema_version"] = CONFIG_SCHEMA_VERSION
+    return cfg
 
 
 def load_config():
@@ -114,7 +178,7 @@ def load_config():
                 data = json.load(f)
             cfg = DEFAULT_CONFIG.copy()
             cfg.update(data)
-            return cfg
+            return _run_migrations(cfg)
         except Exception:
             pass
     return DEFAULT_CONFIG.copy()
@@ -289,6 +353,7 @@ def merge_imported_config(imported):
         except Exception as e:
             report.append(f"Could not merge request history: {e}")
 
+    merged = _run_migrations(merged)
     return merged, report
 
 
