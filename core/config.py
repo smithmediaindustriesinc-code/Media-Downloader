@@ -128,6 +128,10 @@ DEFAULT_CONFIG = {
                             # / rolling avg speed) instead of
                             # item-count-based. OFF by default = exactly
                             # the pre-1.6.8 behaviour. Added 1.6.8.
+    "app_update_include_beta": False,  # Version tab - when on, the in-app
+                            # update check also offers preview/beta builds,
+                            # not just the latest stable release. Off by
+                            # default. Added 1.6.10.
 }
 
 

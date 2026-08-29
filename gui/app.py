@@ -4050,6 +4050,14 @@ class App(*_APP_BASES):
         for w in self.version_status_frame.winfo_children():
             w.destroy()
         self.version_rows = {}
+
+        # The app itself, shown first and in the same row layout as every
+        # dependency - a green/red dot, name, a detail line, and an Update
+        # button on the right in the same column as the others. The actual
+        # update check hits the network, so it runs in a thread and fills
+        # this row in when it returns.
+        self._build_app_version_row()
+
         for item in deps.check_all():
             row = ctk.CTkFrame(self.version_status_frame)
             row.pack(fill="x", pady=4)
@@ -4078,6 +4086,102 @@ class App(*_APP_BASES):
             self.version_rows[item["name"]] = btn
 
         self._refresh_dependency_banner()
+
+    def _build_app_version_row(self):
+        """The 'Media Downloader' row at the top of the Version tab list -
+        same layout as a dependency row, with an Update button (column 2,
+        like the others) once a background check finds a newer release."""
+        from core.app_info import APP_VERSION
+        row = ctk.CTkFrame(self.version_status_frame)
+        row.pack(fill="x", pady=4)
+        row.grid_columnconfigure(1, weight=1)
+        self._app_row_dot = ctk.CTkLabel(row, text="●", text_color="gray50",
+                                          font=self.font_label, width=20)
+        self._app_row_dot.grid(row=0, column=0, rowspan=2, padx=(10, 0))
+        ctk.CTkLabel(row, text="Media Downloader", font=self.font_normal, anchor="w").grid(
+            row=0, column=1, sticky="ew", padx=10, pady=(8, 0))
+        self._app_row_detail = ctk.CTkLabel(row, text=f"Version {APP_VERSION} - checking for updates...",
+                                             font=self.font_small, anchor="w", text_color="gray60")
+        self._app_row_detail.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 8))
+
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.grid(row=0, column=2, rowspan=2, padx=10)
+        self._app_beta_var = ctk.BooleanVar(value=self.cfg.get("app_update_include_beta", False))
+        ctk.CTkCheckBox(right, text="Beta", font=self.font_small, width=20, checkbox_width=16,
+                        checkbox_height=16, variable=self._app_beta_var,
+                        command=self._on_app_update_beta_changed).pack(side="left", padx=(0, 8))
+        self._app_update_btn = ctk.CTkButton(right, text="Update", width=90, font=self.font_normal,
+                                              command=self._app_update_clicked)
+        self._app_update_btn.pack(side="left")
+        self._app_update_btn.pack_forget()  # hidden until the check finds an update
+
+        threading.Thread(target=self._check_app_update_thread, daemon=True).start()
+
+    def _on_app_update_beta_changed(self):
+        self.cfg["app_update_include_beta"] = bool(self._app_beta_var.get())
+        save_config(self.cfg)
+        if hasattr(self, "_app_row_detail") and self._app_row_detail.winfo_exists():
+            self._app_row_detail.configure(text="Re-checking for updates...")
+            self._app_update_btn.pack_forget()
+        threading.Thread(target=self._check_app_update_thread, daemon=True).start()
+
+    def _check_app_update_thread(self):
+        from core.app_info import APP_VERSION
+        from core import app_update
+        info = app_update.check_app_update(
+            APP_VERSION, include_beta=self.cfg.get("app_update_include_beta", False))
+        self._app_update_info = info
+        self.after(0, lambda: self._apply_app_update_info(info))
+
+    def _apply_app_update_info(self, info):
+        if not (hasattr(self, "_app_row_detail") and self._app_row_detail.winfo_exists()):
+            return
+        self._app_row_detail.configure(text=info.get("detail", ""))
+        self._app_row_dot.configure(text_color="#c0392b" if info.get("update_available") else "#2fa84f")
+        if info.get("update_available"):
+            self._app_update_btn.pack(side="left")
+        else:
+            self._app_update_btn.pack_forget()
+
+    def _app_update_clicked(self):
+        info = getattr(self, "_app_update_info", None)
+        if not info or not info.get("update_available"):
+            messagebox.showinfo("Update", "No update is available right now.")
+            return
+        if not messagebox.askyesno(
+                "Update Media Downloader",
+                f"Download and install version {info['latest']}?\n\n"
+                "Media Downloader will close so the installer can replace it, "
+                "then reopen when the installer finishes."):
+            return
+        threading.Thread(target=self._run_dependency_action,
+                         args=({"name": "Media Downloader", "kind": "app",
+                                "url": info.get("url"), "latest": info.get("latest")},),
+                         daemon=True).start()
+
+    def _do_app_update(self, item):
+        """Shared by the app-row Update button and Update All. Downloads the
+        installer for `item['url']`, launches it, and closes the app so the
+        installer can replace the files. Returns (ok, msg)."""
+        from core import app_update
+        self._threadsafe_log(f"Downloading Media Downloader {item.get('latest', '')}...", color="blue")
+
+        def prog(got, total):
+            self.after(0, lambda: self._set_progress(got / total if total else 0, None))
+
+        path, err = app_update.download_installer(item.get("url"), progress_callback=prog)
+        if err:
+            self._threadsafe_log(err, color="red")
+            return False, err
+        self._threadsafe_log(f"Downloaded to {path}. Launching the installer - "
+                              f"Media Downloader will now close.", color="blue")
+        try:
+            os.startfile(path)  # noqa: S606 - launching our own signed-elsewhere installer
+        except Exception as e:
+            return False, f"Could not start the installer: {e}"
+        # Give the log line a moment to render, then close so files unlock.
+        self.after(1200, self._on_close_requested)
+        return True, f"Installer for {item.get('latest', '')} launched."
 
     def _refresh_dependency_banner(self):
         results = deps.check_all()
@@ -4116,6 +4220,10 @@ class App(*_APP_BASES):
             vlc_ok, vlc_path = deps.check_vlc()
             ok, msg = vlc_ok, (f"VLC detected at {vlc_path}" if vlc_ok
                                else "VLC isn't installed - get it from videolan.org (optional).")
+        elif item["kind"] == "app":
+            ok, msg = self._do_app_update(item)
+            if ok:
+                return  # the app is closing - no point refreshing the tab
         else:
             ok, msg = False, "Unknown dependency type."
         self._threadsafe_log(msg)
@@ -4146,6 +4254,26 @@ class App(*_APP_BASES):
             else:
                 ok, msg = False, "Unknown dependency."
             summary.append(f"{item['name']}: {'OK' if ok else 'FAILED'} - {msg}")
+
+        # The app update goes LAST - it launches an external installer and
+        # closes the app, so nothing after it would run. Uses the cached
+        # check from the tab; re-checks if there isn't one.
+        from core.app_info import APP_VERSION
+        from core import app_update
+        info = getattr(self, "_app_update_info", None)
+        if info is None:
+            info = app_update.check_app_update(
+                APP_VERSION, include_beta=self.cfg.get("app_update_include_beta", False))
+        if info.get("update_available"):
+            self.after(0, lambda: self._threadsafe_log("Updating Media Downloader..."))
+            ok, msg = self._do_app_update({"name": "Media Downloader", "kind": "app",
+                                            "url": info.get("url"), "latest": info.get("latest")})
+            summary.append(f"Media Downloader: {'OK' if ok else 'FAILED'} - {msg}")
+            if ok:
+                return  # closing to install
+        else:
+            summary.append(f"Media Downloader: OK - {info.get('detail', 'up to date')}")
+
         full_msg = " | ".join(summary)
         self.after(0, lambda: self._set_inline_status(
             self.dependency_update_status_label, full_msg, "info", clear_after_ms=12000))
