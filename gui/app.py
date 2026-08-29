@@ -25,7 +25,8 @@ ctk.deactivate_automatic_dpi_awareness()
 from core.config import load_config, save_config
 from core.downloader import (Downloader, DownloadCancelled, DownloadStageError, YouTubeBotDetectedError,
                               CookieAccessError, PlaylistFetchTimeout, PlaylistFetchCancelled,
-                              fetch_info, fetch_media_info, fetch_playlist_info, cleanup_partial_files, download_with_retry,
+                              fetch_info, fetch_media_info, fetch_playlist_info, fetch_download_size,
+                              cleanup_partial_files, download_with_retry,
                               MAX_DOWNLOAD_ATTEMPTS,
                               VIDEO_QUALITIES, VIDEO_FORMATS, AUDIO_FORMATS, AUDIO_QUALITIES,
                               ASPECT_RATIO_OPTIONS)
@@ -229,6 +230,15 @@ class App(*_APP_BASES):
         self.last_downloaded_path = None
         self._batch_item_durations = []  # completed-item durations, for the whole-queue ETA estimate
         self._batch_items_remaining = 0
+        # Size-based ETA state (populated only when Advanced > "Pre-fetch file
+        # sizes before a batch" is on). _batch_total_bytes == 0 means "not
+        # pre-fetched" and the ETA falls back to the item-count estimate.
+        self._batch_total_bytes = 0
+        self._batch_bytes_done = 0
+        self._batch_size_by_url = {}
+        self._batch_current_url = None
+        self._batch_prefetch_had_unknowns = False
+        self._prefetch_cancel = None
         self.thumbnail_image = None
         # Small thumbnails (~160x90) are cheap enough to just never
         # garbage-collect for the life of the app. This works around a
@@ -1798,26 +1808,62 @@ class App(*_APP_BASES):
         self.after(1000, self._tick_speed_display)
 
     def _update_eta_label(self):
-        """Builds the combined ETA text: this item's remaining time (from
-        the downloader's own live progress hook) and, if a batch/playlist
-        run is in progress with completed-item history to estimate from,
-        the whole queue's remaining time too."""
+        """Builds the combined ETA text: this item's remaining time and, if a
+        batch/playlist run is in progress, the whole queue's remaining time.
+
+        When the batch "pre-fetch file sizes" stage ran (self._batch_total_bytes
+        > 0), both estimates are SIZE-based: remaining bytes / rolling average
+        download speed. Otherwise they fall back to the item-count estimate
+        (average completed-item duration x items left) and yt-dlp's own
+        per-item ETA - i.e. exactly the pre-1.6.8 behaviour."""
         parts = []
-        item_eta = self._format_eta(self.downloader.last_eta_seconds) if self.downloader else None
+        dl = self.downloader
+        speed = dl.speed_tracker.get_average(window_seconds=5) if dl else None
+
+        item_done = (getattr(dl, "last_downloaded_bytes", 0) or 0) if dl else 0
+        item_total = getattr(dl, "last_total_bytes", None) if dl else None
+
+        # ---- current item ----
+        item_eta_seconds = None
+        if speed and speed > 0 and item_total and item_total > 0:
+            item_eta_seconds = max(item_total - item_done, 0) / speed
+        if item_eta_seconds is None and dl is not None:
+            item_eta_seconds = dl.last_eta_seconds
+        item_eta = self._format_eta(item_eta_seconds)
         if item_eta:
             parts.append(f"~{item_eta} left")
 
-        durations = getattr(self, "_batch_item_durations", None)
+        # ---- whole queue ----
+        total_bytes = getattr(self, "_batch_total_bytes", 0) or 0
         remaining_items = getattr(self, "_batch_items_remaining", 0)
-        if durations and remaining_items > 0:
-            avg = sum(durations) / len(durations)
-            queue_eta_seconds = avg * (remaining_items - 1) + (self.downloader.last_eta_seconds or avg
-                                                                 if self.downloader else avg)
-            queue_eta = self._format_eta(queue_eta_seconds)
-            if queue_eta:
-                parts.append(f"~{queue_eta} for whole queue")
+        queue_eta_seconds = None
+        if total_bytes > 0 and speed and speed > 0:
+            bytes_done = getattr(self, "_batch_bytes_done", 0) or 0
+            cur_url = getattr(self, "_batch_current_url", None)
+            cur_known = cur_url in getattr(self, "_batch_size_by_url", {})
+            # Only subtract the current item's partial progress if its size is
+            # part of total_bytes - otherwise we'd double-count it out.
+            remaining_bytes = total_bytes - bytes_done - (item_done if cur_known else 0)
+            queue_eta_seconds = max(remaining_bytes, 0) / speed
+        else:
+            durations = getattr(self, "_batch_item_durations", None)
+            if durations and remaining_items > 0:
+                avg = sum(durations) / len(durations)
+                tail = (dl.last_eta_seconds if dl and dl.last_eta_seconds else avg)
+                queue_eta_seconds = avg * (remaining_items - 1) + tail
+        queue_eta = self._format_eta(queue_eta_seconds)
+        if queue_eta:
+            note = "" if not self._batch_sizes_are_lower_bound() else " (min)"
+            parts.append(f"~{queue_eta} for whole queue{note}")
 
         self.eta_label.configure(text=" | ".join(parts))
+
+    def _batch_sizes_are_lower_bound(self):
+        """True when a size-based queue ETA is showing but at least one item's
+        size wasn't known during pre-fetch, so the real total is higher."""
+        if not (getattr(self, "_batch_total_bytes", 0) or 0) > 0:
+            return False
+        return bool(getattr(self, "_batch_prefetch_had_unknowns", False))
 
     def _on_main_tab_changed(self):
         """Shows the compact header progress bar + one-line log echo on
@@ -2137,9 +2183,23 @@ class App(*_APP_BASES):
         self.downloader = None
         self._batch_item_durations = []
         self._batch_items_remaining = len(entry_urls)
+        self._reset_batch_size_state()
+
+        if self.cfg.get("batch_prefetch_sizes", False):
+            # _playlist_lookup_cancel is already wired to the Cancel button.
+            self._prefetch_batch_sizes(entry_urls, dtype,
+                                        lambda: self._playlist_lookup_cancel.is_set())
+            if self._playlist_lookup_cancel.is_set():
+                finish_request(request_id)
+                self._threadsafe_log("Playlist cancelled during size pre-fetch.", color="red")
+                self.after(0, lambda: self._set_downloading_state(False))
+                self.after(0, self._refresh_requests_tab)
+                return
+
         for i, entry_url in enumerate(entry_urls, start=1):
             if (self.downloader and self.downloader._cancel) or self._playlist_lookup_cancel.is_set():
                 break  # _playlist_lookup_cancel also covers a Cancel between lookup and item 1
+            self._batch_current_url = entry_url
             update_item(request_id, entry_url, status="downloading")
             self.after(0, lambda i=i, t=len(entry_urls): self.queue_progress_label.configure(text=f"Playlist item {i}/{t}"))
             self.downloader = Downloader(progress_callback=self._threadsafe_progress, log_callback=self._threadsafe_log,
@@ -2167,6 +2227,7 @@ class App(*_APP_BASES):
                     update_entry(history_entry_id, path=existing["path"], status="Skipped (duplicate)")
                     self.after(0, self._refresh_history_tab)
                     self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                    self._batch_bytes_done += self._batch_size_by_url.get(entry_url, 0)
                     continue
 
             status, path = "Success", ""
@@ -2236,6 +2297,7 @@ class App(*_APP_BASES):
             update_entry(history_entry_id, name=unique_name, path=path, status=status)
             self.after(0, self._refresh_history_tab)
             self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+            self._batch_bytes_done += self._batch_size_by_url.get(entry_url, 0)
             if status == "Success":
                 self._batch_item_durations.append(self.downloader.elapsed_seconds())
 
@@ -2247,12 +2309,74 @@ class App(*_APP_BASES):
                     time.sleep(min(0.25, delay_s - waited))
                     waited += 0.25
 
+        self._batch_current_url = None
         finish_request(request_id)
         self._threadsafe_log("Playlist download finished.", color="green")
         self.after(0, lambda: self._set_downloading_state(False))
         self.after(0, self._refresh_history_tab)
         self.after(0, self._refresh_requests_tab)
         self.after(0, self._refresh_playlists_tab)
+
+    # ------------------------------------------------------------------ #
+    def _reset_batch_size_state(self):
+        self._batch_total_bytes = 0
+        self._batch_bytes_done = 0
+        self._batch_size_by_url = {}
+        self._batch_current_url = None
+        self._batch_prefetch_had_unknowns = False
+
+    def _prefetch_batch_sizes(self, urls, dtype, cancel_check):
+        """Optional pre-download pass (Advanced > "Pre-fetch file sizes before
+        a batch"): fetch ONLY each item's download size, nothing else, so the
+        queue/item ETAs can be size-based. Best-effort - a size that can't be
+        determined is simply excluded from the total (the ETA then reads as a
+        lower bound). Honours cancel_check() (abort cleanly) and spaces the
+        requests out so it doesn't hammer the site. Never raises."""
+        self._reset_batch_size_state()
+        total = len(urls)
+        delay_s = max(0, self.cfg.get("batch_delay_seconds", 0))
+        gap = min(delay_s, 3) if delay_s else 0.4  # don't fire dozens of lookups instantly
+        quality_key = self.cfg.get("video_quality", "Best")
+        aspect = self.aspect_var.get() if hasattr(self, "aspect_var") else "Any"
+        cookies = self.cfg.get("cookies_from_browser", "none")
+        known = 0
+        self._threadsafe_log(f"Pre-fetching file sizes... 0/{total}", color="blue")
+        for i, url in enumerate(urls, start=1):
+            if cancel_check():
+                self._threadsafe_log("Size pre-fetch cancelled.", color="red")
+                return
+            self.after(0, lambda i=i, t=total:
+                       self.queue_progress_label.configure(text=f"Pre-fetching sizes {i}/{t}"))
+            try:
+                size = fetch_download_size(url, dtype=dtype, quality_key=quality_key,
+                                           aspect_ratio=aspect, cookies_from_browser=cookies)
+            except Exception:
+                size = None
+            if size and size > 0:
+                self._batch_size_by_url[url] = int(size)
+                self._batch_total_bytes += int(size)
+                known += 1
+            else:
+                self._batch_prefetch_had_unknowns = True
+            self._threadsafe_log(f"Pre-fetching file sizes... {i}/{total}", color="blue")
+            if gap and i < total:
+                waited = 0.0
+                while waited < gap:
+                    if cancel_check():
+                        return
+                    time.sleep(min(0.2, gap - waited))
+                    waited += 0.2
+        unknown = total - known
+        if self._batch_total_bytes > 0:
+            mb = self._batch_total_bytes / (1024 * 1024)
+            size_str = f"{mb / 1024:.2f} GB" if mb >= 1024 else f"{mb:.1f} MB"
+            msg = f"Pre-fetch complete: ~{size_str} across {known} item(s)."
+            if unknown:
+                msg += f" {unknown} item(s) had no known size - the queue ETA is a lower bound."
+            self._threadsafe_log(msg, color="blue")
+        else:
+            self._threadsafe_log("Pre-fetch complete: no sizes could be determined - "
+                                  "ETAs will use the item-count estimate.", color="blue")
 
     # ------------------------------------------------------------------ #
     def start_batch_download(self):
@@ -2315,9 +2439,27 @@ class App(*_APP_BASES):
         # over from a previous batch.
         self._batch_item_durations = []
         self._batch_items_remaining = total
+        self._reset_batch_size_state()
+
+        # Optional pre-fetch stage: size-only pass over the queue before any
+        # real download starts, so the ETAs below become size-based.
+        if self.cfg.get("batch_prefetch_sizes", False):
+            self._prefetch_cancel = threading.Event()
+            self._prefetch_batch_sizes(urls, dtype, lambda: self._prefetch_cancel.is_set())
+            cancelled = self._prefetch_cancel.is_set()
+            self._prefetch_cancel = None
+            if cancelled:
+                self.batch_running = False
+                finish_request(request_id)
+                self._threadsafe_log("Batch cancelled during size pre-fetch.", color="red")
+                self.after(0, lambda: self._set_downloading_state(False, batch=True))
+                self.after(0, self._refresh_requests_tab)
+                return
+
         for i, url in enumerate(urls, start=1):
             if self.downloader and self.downloader._cancel:
                 break
+            self._batch_current_url = url
             update_item(request_id, url, status="downloading")
             self._threadsafe_log(f"--- Queue item {i}/{total} ---")
             self.after(0, lambda i=i, total=total: self.queue_progress_label.configure(text=f"Queue item {i}/{total}"))
@@ -2348,6 +2490,7 @@ class App(*_APP_BASES):
                     update_entry(history_entry_id, path=existing["path"], status="Skipped (duplicate)")
                     self.after(0, self._refresh_history_tab)
                     self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                    self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
                     if delay_s and i < total:
                         time.sleep(min(delay_s, 2))  # a short courtesy pause even on a skip, nothing more
                     continue
@@ -2418,6 +2561,7 @@ class App(*_APP_BASES):
             update_entry(history_entry_id, name=unique_name, path=path, status=status)
             self.after(0, self._refresh_history_tab)
             self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+            self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
             if status == "Success":
                 self._batch_item_durations.append(self.downloader.elapsed_seconds())
 
@@ -2435,6 +2579,7 @@ class App(*_APP_BASES):
                     waited += 0.25
 
         self.batch_running = False
+        self._batch_current_url = None
         finish_request(request_id)
         self._threadsafe_log("Batch queue finished.", color="green")
         self.after(0, lambda: self._set_downloading_state(False, batch=True))
@@ -2457,11 +2602,15 @@ class App(*_APP_BASES):
             self.eta_label.configure(text="")
             self._batch_item_durations = []
             self._batch_items_remaining = 0
+            self._reset_batch_size_state()
 
     def cancel_download(self):
         lookup_cancel = getattr(self, "_playlist_lookup_cancel", None)
         if lookup_cancel is not None:
             lookup_cancel.set()  # abort a slow playlist-info lookup, if one is running
+        prefetch_cancel = getattr(self, "_prefetch_cancel", None)
+        if prefetch_cancel is not None:
+            prefetch_cancel.set()  # abort a batch size pre-fetch pass, if one is running
         if self.downloader:
             self.downloader.cancel()
         self.cancel_btn.configure(state="disabled")
@@ -3607,6 +3756,19 @@ class App(*_APP_BASES):
                              "drop it (no confirmation needed, since it's undoable), Undo or Ctrl+Z to bring "
                              "it back. Removed URLs aren't truly gone until you actually start the "
                              "download.").pack(side="left", padx=(8, 0))
+
+        prefetch_switch_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        prefetch_switch_row.pack(anchor="w", padx=5, pady=(0, 15))
+        self.batch_prefetch_sizes_var = ctk.BooleanVar(value=self.cfg.get("batch_prefetch_sizes", False))
+        ctk.CTkSwitch(prefetch_switch_row, text="Pre-fetch file sizes before a batch", font=self.font_normal,
+                      variable=self.batch_prefetch_sizes_var,
+                      command=self._on_batch_prefetch_sizes_changed).pack(side="left")
+        self._add_hint_icon(prefetch_switch_row, "Before a batch or full-playlist download starts, do a quick "
+                             "pass that fetches ONLY each item's download size (nothing is downloaded yet). "
+                             "The queue's \"time remaining\" and each item's ETA are then based on bytes left "
+                             "over the current average speed, instead of just the number of items left. Adds a "
+                             "short delay up front and a few extra requests; off by default.").pack(
+            side="left", padx=(8, 0))
 
         # ============================================================ #
         # ACCESSIBILITY
@@ -4912,6 +5074,10 @@ class App(*_APP_BASES):
 
     def _on_background_downloads_changed(self):
         self.cfg["background_downloads_enabled"] = self.background_downloads_var.get()
+        save_config(self.cfg)
+
+    def _on_batch_prefetch_sizes_changed(self):
+        self.cfg["batch_prefetch_sizes"] = self.batch_prefetch_sizes_var.get()
         save_config(self.cfg)
 
     def _on_scroll_speed_changed(self, value):

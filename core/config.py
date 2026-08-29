@@ -120,6 +120,14 @@ DEFAULT_CONFIG = {
                             # or the History tab (core.download_requests /
                             # core.history recording is switched off). On
                             # by default. Added 1.6.4.
+    "batch_prefetch_sizes": False,  # Advanced Settings toggle - when on,
+                            # a batch/playlist download first runs a pass
+                            # that fetches ONLY each item's file size
+                            # (nothing else), and the queue + per-item
+                            # ETAs then become size-based (remaining bytes
+                            # / rolling avg speed) instead of
+                            # item-count-based. OFF by default = exactly
+                            # the pre-1.6.8 behaviour. Added 1.6.8.
 }
 
 

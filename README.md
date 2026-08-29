@@ -106,6 +106,20 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.8
+
+- **Optional "pre-fetch file sizes" stage for batches.** New toggle in
+  **Settings → Advanced → Batch Queue** ("Pre-fetch file sizes before a
+  batch"), off by default. When on, a batch or full-playlist download first
+  does a quick pass that fetches only each item's download size — nothing is
+  downloaded yet — showing "Pre-fetching file sizes… 3/20" in the log.
+- **Size-based ETAs.** When the pre-fetch data is available, the whole-queue
+  "time remaining" is now *(total remaining bytes ÷ current average download
+  speed)* rather than *(items left × average time per item)*, and the same
+  bytes-remaining ÷ speed math drives the single-item ETA. If some items had
+  no known size, the queue ETA is shown as a lower bound. With the toggle off,
+  ETAs behave exactly as before.
+
 ### 1.6.7
 
 - **Redownload a successful item.** In a request's detail view, a successful

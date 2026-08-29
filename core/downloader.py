@@ -395,6 +395,96 @@ def _format_for_aspect_ratio(url, quality_key, aspect_key, info=None):
     return f"{chosen['format_id']}+bestaudio/best"
 
 
+def _estimate_bytes_from_info(info):
+    """Given a PROCESSED yt-dlp info dict (format selection already applied,
+    so it carries requested_downloads / requested_formats), return the best
+    available byte estimate for what would actually be written to disk -
+    summing separate video+audio streams when the chosen format is a merge.
+    Returns an int, or None when nothing usable is present."""
+    if not info:
+        return None
+
+    def _one(f):
+        f = f or {}
+        return f.get("filesize") or f.get("filesize_approx")
+
+    downloads = info.get("requested_downloads")
+    if downloads:
+        total, seen = 0, False
+        for d in downloads:
+            subs = d.get("requested_formats")
+            if subs:
+                for s in subs:
+                    v = _one(s)
+                    if v:
+                        total += v
+                        seen = True
+            else:
+                v = _one(d)
+                if v:
+                    total += v
+                    seen = True
+        if seen:
+            return int(total)
+
+    reqf = info.get("requested_formats")
+    if reqf:
+        total, seen = 0, False
+        for s in reqf:
+            v = _one(s)
+            if v:
+                total += v
+                seen = True
+        if seen:
+            return int(total)
+
+    v = _one(info)
+    return int(v) if v else None
+
+
+def fetch_download_size(url, dtype="Video", quality_key="Best", fmt="mp4",
+                        aspect_ratio="Any", cookies_from_browser="none"):
+    """Best-effort estimate, in bytes, of what a REAL download of `url` at the
+    current settings would pull down - used by the optional batch "pre-fetch
+    file sizes" stage so the queue/item ETAs can be size-based rather than
+    item-count-based.
+
+    Uses the SAME format selector the real download would use (bestaudio/best
+    for audio; _format_for_aspect_ratio()'s pick for video, so an explicit
+    aspect ratio is honoured), runs yt-dlp with skip_download/simulate and
+    nothing written, and reads the resolved format's filesize /
+    filesize_approx (summing video+audio when they're separate streams).
+
+    Fast-ish (one extraction, or two only when a non-"Any" aspect ratio
+    forces a format-list lookup) and NEVER raises - returns None on any
+    failure or when the size genuinely isn't known."""
+    try:
+        options = {
+            "quiet": True, "no_warnings": True, "skip_download": True,
+            "simulate": True, "noplaylist": True, "noprogress": True,
+        }
+        options.update(_ffmpeg_options())
+        options.update(_cookie_options(cookies_from_browser))
+
+        if dtype == "Audio":
+            fmt_selector = "bestaudio/best"
+        else:
+            try:
+                fmt_selector = _format_for_aspect_ratio(url, quality_key, aspect_ratio)
+            except Exception:
+                fmt_selector = VIDEO_QUALITY_MAP.get(quality_key, VIDEO_QUALITY_MAP["Best"])
+        options["format"] = fmt_selector
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if info and info.get("entries"):
+            entries = [e for e in info["entries"] if e]
+            info = entries[0] if entries else None
+        return _estimate_bytes_from_info(info)
+    except Exception:
+        return None
+
+
 def _cleanup_stray_part_files(out_dir, name, final_path):
     """After a SUCCESSFUL download, removes any leftover .part/.ytdl
     fragment files - a real, confirmed gap in yt-dlp's own cleanup,
@@ -423,6 +513,8 @@ class Downloader:
         self.item_start_time = None    # set when a single URL's download begins
         self.last_speed = None         # bytes/sec, from the most recent hook call (raw, unsmoothed)
         self.last_eta_seconds = None
+        self.last_total_bytes = None       # current item's total size (bytes), from the most recent hook call
+        self.last_downloaded_bytes = 0     # current item's bytes fetched so far, from the most recent hook call
         # ping_ms_provider: an optional zero-arg callable returning the
         # app's most recently measured connection latency (see
         # core/network_status.py) - used to scale the speed tracker's
@@ -453,6 +545,8 @@ class Downloader:
             self.speed_tracker.add_sample(speed, ping_ms=ping)
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             downloaded = d.get("downloaded_bytes", 0)
+            self.last_total_bytes = total
+            self.last_downloaded_bytes = downloaded
             pct = (downloaded / total) if total else 0
             # ETA from the SMOOTHED 5-second-average speed, not the raw
             # instant reading - a single jittery hook call shouldn't
@@ -480,6 +574,8 @@ class Downloader:
         self.last_speed = None
         self.speed_tracker.reset()
         self.last_eta_seconds = None
+        self.last_total_bytes = None
+        self.last_downloaded_bytes = 0
         os_safe_dir = out_dir.rstrip("/\\")
         outtmpl = f"{os_safe_dir}/{name}.%(ext)s"
 
@@ -544,6 +640,8 @@ class Downloader:
         self.last_speed = None
         self.speed_tracker.reset()
         self.last_eta_seconds = None
+        self.last_total_bytes = None
+        self.last_downloaded_bytes = 0
         os_safe_dir = out_dir.rstrip("/\\")
         outtmpl = f"{os_safe_dir}/{name}.%(ext)s"
         postprocessors = [{
