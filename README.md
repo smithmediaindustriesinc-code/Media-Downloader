@@ -106,6 +106,23 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.9
+
+- **"View a request" is now an in-app page, not a pop-up.** Clicking **View**
+  on a request in **History → Request History** no longer opens a separate
+  modal window — it swaps the request list out for the request's detail page
+  in place, with a **← Back** button at the top (Escape also goes back). All
+  the same controls are there: the editable title, the "Select multiple"
+  toolbar with Copy/Retry Selected, and the per-URL Copy Link / Retry /
+  Redownload buttons.
+- **Renaming a request no longer flashes the screen.** The Rename/Save
+  toggle updates the title in place instead of tearing down and rebuilding
+  the whole view.
+- **Faster request detail view.** Re-renders (a retry finishing, toggling a
+  checkbox) now only rebuild the rows that actually changed instead of every
+  row, the refresh is debounced, file sizes are read with a single stat call,
+  and the multi-select toolbar is reused across renders.
+
 ### 1.6.8
 
 - **Optional "pre-fetch file sizes" stage for batches.** New toggle in
