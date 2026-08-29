@@ -18,8 +18,12 @@ if not defined PY (
     "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
     "%ProgramFiles%\Python313\python.exe"
     "%ProgramFiles%\Python312\python.exe"
-  ) do if exist "%%~P" set "PY=%%~P"
+  ) do if exist "%%~P" set PY="%%~P"
 )
+REM PY is now either  py -3  /  python  (a command, no quotes) or a
+REM "quoted full path" - both expand correctly used unquoted as %PY% below,
+REM which matters when the path contains a space (e.g. a user folder like
+REM "Elder Michael Smith").
 if not defined PY (
   echo.
   echo ERROR: could not find Python. Install it from https://www.python.org/downloads/
