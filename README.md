@@ -1,8 +1,8 @@
 # Media Downloader
 
 A customtkinter GUI for `yt-dlp`, built for someone who downloads media
-constantly - single-window, tabbed, with playlists, history, and dependency
-auto-install.
+constantly - single-window, tabbed, with playlists, history, dependency
+auto-install, and "Open in VLC" shortcuts.
 
 ## Setup (running from source)
 
@@ -43,9 +43,9 @@ VideoDownloaderApp/
 │   ├── config.py                   # settings storage
 │   ├── history.py                  # download history storage
 │   ├── playlists.py                 # playlist storage
-│   ├── dependencies.py              # check/install ffmpeg and pip pkgs
+│   ├── dependencies.py              # check/install ffmpeg + pip pkgs, detect VLC
 │   ├── downloader.py                 # yt-dlp wrapper
-│   └── utils.py                       # file moves, folder/file opening, sanitizing
+│   └── utils.py                       # file moves, folder/file/VLC opening, sanitizing
 ├── gui/
 │   ├── app.py                         # the whole window (5 tabs)
 │   ├── scrollable_dropdown.py          # custom scrollable dropdown widget
@@ -105,6 +105,20 @@ See **Update Helper.txt** for a full walkthrough of how the code is
 organized and how to change or add features yourself.
 
 ## Changelog
+
+### 1.6.5
+
+- **VLC integration is back.** "Open in VLC" buttons return alongside "Open
+  file" — on History rows, the Playlists track list, the Media Library results,
+  and the Download tab's output row. "Open file" still opens with your OS's
+  default app; the VLC button launches VLC directly.
+- The **Version** tab now shows whether VLC is installed (detected via PATH,
+  the standard install folders, or the VideoLAN registry key). When it's
+  missing it offers a **"Get VLC"** button that opens the videolan.org download
+  page (or the Microsoft Store listing) — the app no longer downloads or
+  installs VLC automatically.
+- If VLC isn't installed, the "Open in VLC" buttons warn gracefully with a
+  link to get it rather than doing nothing.
 
 ### 1.6.4
 

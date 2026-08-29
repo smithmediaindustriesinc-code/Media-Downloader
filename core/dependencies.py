@@ -1,13 +1,16 @@
 """
 Dependency detection + installation.
 
-Handles two kinds of dependency:
+Handles these kinds of dependency:
   - PYTHON packages (customtkinter, yt-dlp, pillow) -> checked via import,
     installed via `pip install`.
   - FFMPEG -> not on PATH by default on most Windows machines. We download
     a static build and drop ffmpeg.exe/ffprobe.exe into <app_dir>/ffmpeg/bin
     so nothing needs admin rights or a PATH edit. yt-dlp is then told where
     to find it via ffmpeg_location.
+  - VLC -> detection only (common install paths / Windows registry). The
+    app never downloads or installs VLC; the Version tab just links out to
+    videolan.org when it's missing.
 
 Every check/install function returns (ok: bool, message: str) so the GUI can
 show the user exactly what happened instead of failing silently.
@@ -160,6 +163,53 @@ def install_ffmpeg(progress_callback=None):
 
 
 # --------------------------------------------------------------------- #
+# VLC  (detection only - the app never downloads or installs VLC)
+# --------------------------------------------------------------------- #
+WINDOWS_VLC_PATHS = [
+    r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+    r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+]
+
+
+def find_vlc():
+    """Return the path to vlc.exe if VLC is installed, else None. Checks
+    the system PATH first, then (on Windows) the standard install
+    locations and the VideoLAN registry key. Detection only - when VLC is
+    missing the app points the user at videolan.org rather than
+    installing it."""
+    on_path = shutil.which("vlc")
+    if on_path:
+        return on_path
+    if platform.system() == "Windows":
+        for p in WINDOWS_VLC_PATHS:
+            if os.path.exists(p):
+                return p
+        try:
+            import winreg
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for subkey in (r"SOFTWARE\VideoLAN\VLC",
+                               r"SOFTWARE\WOW6432Node\VideoLAN\VLC"):
+                    try:
+                        with winreg.OpenKey(hive, subkey) as key:
+                            install_dir = winreg.QueryValueEx(key, "InstallDir")[0]
+                    except OSError:
+                        continue
+                    candidate = os.path.join(install_dir, "vlc.exe")
+                    if os.path.exists(candidate):
+                        return candidate
+        except Exception:
+            pass
+    return None
+
+
+def check_vlc():
+    """(ok, path_or_None). VLC is optional - only used by the app's
+    'Open in VLC' buttons."""
+    path = find_vlc()
+    return (path is not None), path
+
+
+# --------------------------------------------------------------------- #
 # Aggregate status for the Version tab
 # --------------------------------------------------------------------- #
 def check_all():
@@ -185,6 +235,15 @@ def check_all():
         "pip_spec": None,
         "ok": ffmpeg_ok,
         "detail": f"Found: {ffmpeg_path}" if ffmpeg_ok else "Not installed (required for merging/audio extraction)",
+    })
+
+    vlc_ok, vlc_path = check_vlc()
+    results.append({
+        "name": "VLC Media Player",
+        "kind": "vlc",
+        "pip_spec": None,
+        "ok": vlc_ok,
+        "detail": f"Found: {vlc_path}" if vlc_ok else "Not installed (optional - used by the 'Open in VLC' buttons)",
     })
 
     return results

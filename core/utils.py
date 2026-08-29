@@ -4,6 +4,8 @@ import platform
 import shutil
 import subprocess
 
+from core.dependencies import find_vlc
+
 
 def open_folder(path):
     """Open a folder in the OS file manager, cross-platform."""
@@ -48,6 +50,63 @@ def open_file(path):
         return False, "permission_denied"
     except Exception as e:
         return False, str(e)
+
+
+def open_in_vlc(path):
+    """Open a file or folder with VLC, playing it immediately. Returns
+    (ok, message).
+
+    --no-one-instance / --no-playlist-enqueue are the actual fix for a
+    real bug this app had: without them, if VLC was already running,
+    VLC's default single-instance behavior hands the new file off to
+    the EXISTING window as a playlist addition rather than actually
+    playing it right away - which reads as "VLC opened, but the file
+    never played" (or, worse, looks like it just opened to a generic
+    library/folder view instead of the specific file). Forcing a
+    genuinely new, dedicated instance for every call here means the
+    requested file always actually starts playing, regardless of
+    whether another VLC window happens to already be open."""
+    if not path or not os.path.exists(path):
+        return False, f"Path not found: {path}"
+    vlc_path = find_vlc()
+    if not vlc_path:
+        return False, ("VLC isn't installed. Get it from the Version tab "
+                       "or https://www.videolan.org/vlc/")
+    try:
+        subprocess.Popen([vlc_path, "--no-one-instance", "--no-playlist-enqueue", path])
+        return True, "Opened in VLC."
+    except Exception as e:
+        return False, f"Could not launch VLC: {e}"
+
+
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".wmv", ".m4v", ".mpg", ".mpeg", ".ts"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".opus", ".aac", ".ogg", ".wma"}
+
+
+def open_media_smart(path):
+    """Opens a file with whatever's actually appropriate for its type,
+    consistently, rather than always defaulting to one app: video and
+    audio files open in VLC (if installed - falls back to the OS default
+    otherwise), everything else (images, documents, archives, anything)
+    opens with the OS's own default application for it. Returns
+    (ok, message) the same shape as open_in_vlc, for consistent error
+    handling at call sites."""
+    if not path or not os.path.exists(path):
+        return False, f"Path not found: {path}"
+    ext = os.path.splitext(path)[1].lower()
+    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+        if find_vlc():
+            return open_in_vlc(path)
+        # No VLC - fall back to whatever the OS considers default for
+        # this file type, rather than failing outright.
+        ok, msg = open_file(path)
+        if ok:
+            return True, "Opened with your OS's default app (VLC not installed)."
+        return False, msg if msg == "permission_denied" else "Could not open this file."
+    ok, msg = open_file(path)
+    if ok:
+        return True, "Opened with your OS's default app for this file type."
+    return False, msg if msg == "permission_denied" else "Could not open this file."
 
 
 def list_files(folder):
