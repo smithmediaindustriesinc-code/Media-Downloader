@@ -946,6 +946,12 @@ class App(*_APP_BASES):
         self.batch_add_entry.bind("<Return>", lambda e: self._add_batch_urls_from_entry())
         ctk.CTkButton(add_row, text="Add", width=70, font=self.font_normal,
                       command=self._add_batch_urls_from_entry).grid(row=0, column=1)
+        # Live count of what's queued up, before Start Queue is pressed -
+        # updates as URLs are added (one at a time, pasted in bulk, or
+        # dropped in), removed, undone, or cleared. See _refresh_batch_dynamic_list.
+        self.batch_queue_size_label = ctk.CTkLabel(add_row, text="empty", font=self.font_small,
+                                                    text_color="gray60", width=70, anchor="e")
+        self.batch_queue_size_label.grid(row=0, column=2, padx=(8, 0))
 
         undo_row = ctk.CTkFrame(self._batch_dynamic_frame, fg_color="transparent")
         undo_row.grid(row=1, column=0, sticky="w", pady=(0, 6))
@@ -1066,6 +1072,10 @@ class App(*_APP_BASES):
         self.batch_undo_btn.configure(state="normal" if self._batch_undo_stack else "disabled")
         self.batch_undo_count_label.configure(
             text=f"{len(self._batch_undo_stack)} removed" if self._batch_undo_stack else "")
+        if hasattr(self, "batch_queue_size_label"):
+            n = len(self._batch_urls)
+            self.batch_queue_size_label.configure(
+                text="empty" if n == 0 else ("1 URL" if n == 1 else f"{n} URLs"))
 
     # ------------------------------------------------------------------
     # 1.6.1 - drag a video thumbnail from a browser onto the window

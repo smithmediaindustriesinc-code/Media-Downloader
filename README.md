@@ -106,6 +106,12 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.3
+
+- The **Batch Queue** dynamic URL list now shows a live count of what's queued
+  ("3 URLs") as you add URLs — one at a time, pasted in bulk, or dropped in —
+  and as you remove, undo, or clear them, before you press Start Queue.
+
 ### 1.6.2
 
 - Developer-unlock credentials rotated and stored as a salted PBKDF2 hash instead of plaintext.
