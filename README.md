@@ -106,6 +106,17 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.7
+
+- **Redownload a successful item.** In a request's detail view, a successful
+  item now has a **Redownload** button (was a disabled "Retry") — handy when
+  you've deleted the file. It fetches again into the request's original folder.
+- **Retry only one request's failures.** Each request row with failed items now
+  has its own **"Retry failed (N)"** button, separate from the global Retry All.
+- When retrying, the queue counter now **resumes from where the request left
+  off** — a 20-item request with 6 already done shows "Retry 7/20" onward, not
+  "Retry 1/14".
+
 ### 1.6.6
 
 - Each row in the **History** tab now has its own **Delete** button, so you can

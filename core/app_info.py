@@ -4,6 +4,6 @@ installer.iss's MyAppVersion when bumping versions - they're two
 separate files (Inno Setup scripts can't import Python), but this is the
 one place in the actual application to update."""
 
-APP_VERSION = "1.6.6"
+APP_VERSION = "1.6.7"
 APP_RELEASE_DATE = "2026-08-28"
 APP_PUBLISHER = "Smith Media Industries inc."

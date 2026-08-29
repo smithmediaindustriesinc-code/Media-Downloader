@@ -280,12 +280,47 @@ def _build_request_row(app, parent, req, status_key, mode, refresh_callback):
 
     btns = ctk.CTkFrame(row, fg_color="transparent")
     btns.grid(row=0, column=2, padx=10)
+    failed_urls = [u for u, it in req.get("items", {}).items() if it.get("status") == "failed"]
+    if failed_urls:
+        ctk.CTkButton(btns, text=f"Retry failed ({len(failed_urls)})", width=125, font=app.font_small,
+                      command=lambda r=req, fu=list(failed_urls):
+                          _retry_request_failed(app, r, fu, refresh_callback)
+                      ).pack(side="left", padx=(0, 6))
     ctk.CTkButton(btns, text="View", width=70, font=app.font_small,
                   command=lambda r=req: open_request_detail(app, r["request_id"], refresh_callback)
                   ).pack(side="left", padx=(0, 6))
     ctk.CTkButton(btns, text="Delete", width=70, font=app.font_small, fg_color="#a13333", hover_color="#7d2626",
                   command=lambda r=req: _delete_request_clicked(r["request_id"], refresh_callback)
                   ).pack(side="left")
+
+
+def _retry_request_failed(app, req, failed_urls, refresh_callback):
+    """Retry only the failed items of ONE request. The queue counter
+    resumes from the number of items in this request that already
+    succeeded (so a 20-item request with 6 done shows "Retry 7/20"
+    onward), not from 1."""
+    if _download_busy(app):
+        messagebox.showinfo("Download in progress",
+                            "Wait for the current download to finish before retrying.")
+        return
+    if not failed_urls:
+        messagebox.showinfo("Retry failed", "Nothing failed in this request.")
+        return
+    if not messagebox.askyesno("Retry failed",
+                               f"Retry {len(failed_urls)} failed item(s) in this request?"):
+        return
+    request_id = req["request_id"]
+    items = req.get("items", {})
+    total = len(items)
+    already_done = sum(1 for it in items.values() if it.get("status") == "success")
+    for u in failed_urls:
+        reopen_for_retry(request_id, u)
+    refresh_callback()
+    threading.Thread(
+        target=_retry_all_thread,
+        args=(app, [(request_id, u) for u in failed_urls], refresh_callback),
+        kwargs={"counter_base": already_done, "counter_total": total},
+        daemon=True).start()
 
 
 def _delete_request_clicked(request_id, refresh_callback):
@@ -453,12 +488,16 @@ def _build_item_row(app, parent, request_id, url, item, render_callback, parent_
     btns.grid(row=0, column=col + 2, rowspan=2, padx=10)
     ctk.CTkButton(btns, text="Copy Link", width=85, font=app.font_small, fg_color="gray40", hover_color="gray30",
                   command=lambda u=url: _copy_link(app, u)).pack(side="left", padx=(0, 6))
-    retry_btn = ctk.CTkButton(btns, text="Retry", width=65, font=app.font_small,
+    # For a successful item the button becomes "Redownload" (still
+    # enabled) - the common reason to want it is that the file was
+    # deleted; it fetches again into the request's original out_dir,
+    # exactly like a retry.
+    is_success = status == "success"
+    retry_btn = ctk.CTkButton(btns, text="Redownload" if is_success else "Retry",
+                               width=90 if is_success else 65, font=app.font_small,
                                command=lambda u=url: _retry_url(app, request_id, u, render_callback,
                                                                  parent_refresh_callback, retry_btn))
     retry_btn.pack(side="left")
-    if status == "success":
-        retry_btn.configure(state="disabled")
 
 
 def _copy_link(app, url):
@@ -594,16 +633,27 @@ def _retry_url_thread(app, request_id, url, render_callback, parent_refresh_call
     app.after(0, app._refresh_history_tab)
 
 
-def _retry_all_thread(app, pairs, refresh_callback):
+def _retry_all_thread(app, pairs, refresh_callback, counter_base=0, counter_total=None):
     """Retries every given (request_id, url) pair one at a time, in the
     background - sequential rather than all-at-once, same reasoning as
     the batch-delay setting elsewhere: not hammering a site (or the
-    user's own connection) with a burst of simultaneous requests."""
+    user's own connection) with a burst of simultaneous requests.
+
+    The queue counter shown in the log/progress row starts at
+    counter_base + 1 and runs to counter_total. For a per-request
+    "Retry failed", the caller passes counter_base = how many items in
+    that request already succeeded and counter_total = the request's
+    total item count, so it reads e.g. "Retry 7/20" - it picks up where
+    the original run left off rather than restarting from 1."""
     delay_s = max(0, app.cfg.get("batch_delay_seconds", 3))
     total = len(pairs)
+    grand_total = counter_total if counter_total is not None else total
     app.after(0, lambda: app._set_downloading_state(True))
     try:
         for i, (request_id, url) in enumerate(pairs, start=1):
+            n = counter_base + i
+            app.after(0, lambda n=n, gt=grand_total:
+                      app.queue_progress_label.configure(text=f"Retry {n}/{gt}"))
             _do_retry_download(app, request_id, url, manage_ui_state=False)
             app.after(0, refresh_callback)
             app.after(0, app._refresh_history_tab)
@@ -620,4 +670,5 @@ def _retry_all_thread(app, pairs, refresh_callback):
                     waited += 0.25
     finally:
         app.after(0, lambda: app._set_downloading_state(False))
-    app.after(0, lambda: app._threadsafe_log(f"Retry All finished ({total} item(s))."))
+        app.after(0, lambda: app.queue_progress_label.configure(text=""))
+    app.after(0, lambda: app._threadsafe_log(f"Retry finished ({total} item(s))."))
