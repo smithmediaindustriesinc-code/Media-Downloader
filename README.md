@@ -106,9 +106,10 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
-### 1.7.0
+### 1.6.10
 
-Rolls up the whole 1.6.x line (1.6.1–1.6.10) into one release. Highlights:
+Closes out the 1.6.x line and rolls the whole thing (1.6.1–1.6.10) up into one
+stable release. Highlights across the line:
 
 - **Drag a video thumbnail from your browser onto the window** to queue it (1.6.1).
 - **VLC is back** — "Open in VLC" alongside "Open file"; the Version tab links you to
@@ -124,9 +125,7 @@ Rolls up the whole 1.6.x line (1.6.1–1.6.10) into one release. Highlights:
   exactly (1.6.2–1.6.6).
 - Developer-unlock credentials are now a salted PBKDF2 hash, not plaintext (1.6.2).
 
-Full per-version detail below.
-
-### 1.6.10
+1.6.10 itself:
 
 - **Update Media Downloader from inside the app.** The Version tab now lists
   "Media Downloader" itself at the top, with an **Update** button in the same
