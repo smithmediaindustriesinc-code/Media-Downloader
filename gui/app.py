@@ -603,6 +603,7 @@ class App(*_APP_BASES):
         self.mini_log_label = ctk.CTkLabel(header, text="", font=self.font_small, text_color="gray60", anchor="w")
         self.mini_log_label.grid(row=2, column=0, sticky="w", pady=(2, 0))
         self._last_mini_log_text = ""
+        self._last_mini_log_color = "gray60"
 
         # Save status - always visible (not gated to non-Download tabs
         # like the log echo above it), right below it under the title.
@@ -1353,6 +1354,7 @@ class App(*_APP_BASES):
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
         self._log_entries = []
+        self._sync_mini_log("")  # no bottom line anymore
 
     # ------------------------------------------------------------------ #
     def _on_type_change(self, value):
@@ -1558,11 +1560,10 @@ class App(*_APP_BASES):
         shows what happened while it was off, rather than a gap."""
         entry = (level, message, color)
         self._log_entries.append(entry)
-        if hasattr(self, "mini_log_label"):
-            mini_color = self.LOG_COLORS.get(color, "gray60")
-            self._last_mini_log_text = message
-            if self.tabview.get() != "Download":
-                self.mini_log_label.configure(text=message, text_color=mini_color)
+        # The mini one-line echo mirrors the *bottom line of the visible log*
+        # exactly - so it is updated only from _append_log_line (lines that
+        # actually make it into log_box at the current mode), never from here
+        # where a line might be filtered out or the log disabled.
         if not getattr(self, "log_enabled_var", None) or not self.log_enabled_var.get():
             return
         if self.LOG_LEVELS.get(level, 0) <= self.LOG_LEVELS.get(self._log_mode_var.get().lower(), 0):
@@ -1578,6 +1579,7 @@ class App(*_APP_BASES):
         else:
             self.log_box.grid_remove()
             self.log_disabled_placeholder.grid()
+            self._sync_mini_log("")  # no visible log -> no bottom line to mirror
 
     def _append_log_line(self, message, color):
         self.log_box.configure(state="normal")
@@ -1590,17 +1592,22 @@ class App(*_APP_BASES):
             self.log_box.insert("end", message + "\n")
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
-        # Mirrors the same line (and color, when it has one) into the
-        # one-line mini log echo shown on non-Download tabs. Only
-        # actually visually updated when NOT on the Download tab
-        # (which already has the real log right there) - _last_mini_log_text
-        # is still tracked either way, so switching to another tab
-        # later shows the truly most-recent message, not a stale one.
-        if hasattr(self, "mini_log_label"):
-            mini_color = self.LOG_COLORS.get(color, "gray60")
-            self._last_mini_log_text = message
-            if self.tabview.get() != "Download":
-                self.mini_log_label.configure(text=message, text_color=mini_color)
+        # This line is now the bottom line of the visible log, so mirror it
+        # into the one-line mini echo. _last_mini_log_text is tracked even
+        # while on the Download tab (which shows the real log right there),
+        # so switching to another tab later shows this exact line.
+        self._sync_mini_log(message, color)
+
+    def _sync_mini_log(self, message, color=None):
+        """Point the one-line mini log echo at `message` - always the current
+        bottom line of the visible log, same colour. Pass message="" to blank
+        it (log cleared / nothing displayed)."""
+        if not hasattr(self, "mini_log_label"):
+            return
+        self._last_mini_log_text = message
+        self._last_mini_log_color = self.LOG_COLORS.get(color, "gray60")
+        if self.tabview.get() != "Download":
+            self.mini_log_label.configure(text=message, text_color=self._last_mini_log_color)
 
     def _prompt_dev_feature_redirect(self, feature_description="This feature"):
         """Gate for anything that needs a Developer-tab feature toggle
@@ -1657,9 +1664,16 @@ class App(*_APP_BASES):
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
         current_level = self.LOG_LEVELS.get(self._log_mode_var.get().lower(), 0)
-        for level, message, color in self._log_entries:
-            if self.LOG_LEVELS.get(level, 0) <= current_level:
-                self._append_log_line(message, color)
+        displayed = [(m, c) for lvl, m, c in self._log_entries
+                     if self.LOG_LEVELS.get(lvl, 0) <= current_level]
+        for message, color in displayed:
+            self._append_log_line(message, color)
+        # Keep the mini echo pinned to the new bottom line (or blank if the
+        # new mode filters everything out).
+        if displayed:
+            self._sync_mini_log(*displayed[-1])
+        else:
+            self._sync_mini_log("")
 
     @staticmethod
     def _format_eta(seconds):
@@ -1776,7 +1790,9 @@ class App(*_APP_BASES):
         if self.tabview.get() == "Download":
             self.mini_log_label.configure(text="")
         else:
-            self.mini_log_label.configure(text=getattr(self, "_last_mini_log_text", ""))
+            self.mini_log_label.configure(
+                text=getattr(self, "_last_mini_log_text", ""),
+                text_color=getattr(self, "_last_mini_log_color", "gray60"))
 
     # ------------------------------------------------------------------ #
     def _single_download_busy(self):

@@ -109,6 +109,10 @@ organized and how to change or add features yourself.
 ### 1.6.2
 
 - Developer-unlock credentials rotated and stored as a salted PBKDF2 hash instead of plaintext.
+- The one-line log echo shown at the top on non-Download tabs now mirrors the
+  **bottom line of the visible log exactly** — same text and colour, and it
+  respects the current log mode and the log-enabled toggle (it no longer shows
+  lines that were filtered out of the log itself).
 
 ### 1.6.1
 
