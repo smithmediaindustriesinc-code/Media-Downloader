@@ -51,7 +51,7 @@ def _file_size_or_none(path):
         return None
     try:
         st = os.stat(path)
-    except OSError:
+    except (OSError, ValueError):  # ValueError: embedded NUL in path (matches genericpath.isfile)
         return None
     return st.st_size if stat.S_ISREG(st.st_mode) else None
 
@@ -145,12 +145,21 @@ def build_request_history_section(app, parent):
     def show_detail(request_id):
         if not (list_view.winfo_exists() and detail_view.winfo_exists()):
             return
+        if detail_view.winfo_ismapped():
+            return  # already showing a detail page (e.g. a double-click on View)
+        if get_request(request_id) is None:
+            messagebox.showinfo("Not found", "That request no longer exists (it may have been deleted).")
+            refresh()
+            return
         list_view.pack_forget()
         detail_view.pack(fill="both", expand=True)
         _render_request_detail(app, detail_view, request_id,
                                list_refresh=refresh, back_callback=show_list)
 
     def show_list():
+        # Any retry thread still holding an old page's render closure will
+        # now dispatch to nothing (see render() in _render_request_detail).
+        app._request_detail_render = None
         if detail_view.winfo_exists():
             for w in detail_view.winfo_children():
                 w.destroy()
@@ -527,10 +536,19 @@ def _render_request_detail(app, container, request_id, list_refresh, back_callba
             else:
                 frame.pack_configure(side="top", fill="x", pady=3, after=ordered[i - 1])
 
+    # The debounce slot lives on `app` and is shared, so a retry thread that
+    # captured an OLD page's `render` (then the user hit Back and re-opened
+    # the request) must not cancel or drive the live page. Dispatch through
+    # this pointer, which show_list() nulls and each _render_request_detail
+    # sets to its own _do_render - so a stale render() is a harmless no-op
+    # and a live one always hits the current page.
+    app._request_detail_render = _do_render
+
     def render():
         # Coalesce bursts (worker threads fire this per retried item via
         # app.after) into one rebuild, same pattern as _refresh_history_tab.
-        app._debounced_call("_request_detail_render_after_id", 120, _do_render)
+        app._debounced_call("_request_detail_render_after_id", 120,
+                            lambda: (getattr(app, "_request_detail_render", None) or (lambda: None))())
 
     def copy_selected():
         selected = item_selector.selected_ids()
