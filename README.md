@@ -127,13 +127,18 @@ stable release. Highlights across the line:
 
 1.6.10 itself:
 
-- **Update Media Downloader from inside the app.** The Version tab now lists
-  "Media Downloader" itself at the top, with an **Update** button in the same
-  place as the dependency Update buttons. It checks the release list, and when
-  a newer version is out it downloads that installer, launches it, and closes
-  the app so it can be replaced. A small **Beta** checkbox (off by default)
-  makes the check also offer preview builds. **Update All** now includes the
-  app update (run last, since it closes the app).
+- **Update Media Downloader from inside the app.** The Version tab lists
+  "Media Downloader" itself at the top, with its own dedicated
+  **Download / Update** button (always visible) and a **Beta** checkbox
+  (off by default) right beside it. It checks the release list; when a newer
+  version is out the button reads **Update** and an in-place update downloads
+  the installer, launches it, and closes the app so it can be replaced.
+  **Update All** includes the app update (run last, since it closes the app).
+- **Beta: separate copy or update in place.** With **Beta** ticked, pressing
+  the button asks whether to install the latest preview build as a **separate
+  copy** (downloads the installer and shows it in Explorer — your current
+  install is left alone, you pick a different folder) or to **update this copy**
+  in place like a normal update.
 
 ### 1.6.9
 

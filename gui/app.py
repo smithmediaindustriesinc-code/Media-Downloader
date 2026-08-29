@@ -4110,10 +4110,9 @@ class App(*_APP_BASES):
         ctk.CTkCheckBox(right, text="Beta", font=self.font_small, width=20, checkbox_width=16,
                         checkbox_height=16, variable=self._app_beta_var,
                         command=self._on_app_update_beta_changed).pack(side="left", padx=(0, 8))
-        self._app_update_btn = ctk.CTkButton(right, text="Update", width=90, font=self.font_normal,
+        self._app_update_btn = ctk.CTkButton(right, text="Download", width=90, font=self.font_normal,
                                               command=self._app_update_clicked)
-        self._app_update_btn.pack(side="left")
-        self._app_update_btn.pack_forget()  # hidden until the check finds an update
+        self._app_update_btn.pack(side="left")  # its own dedicated button, always visible
 
         threading.Thread(target=self._check_app_update_thread, daemon=True).start()
 
@@ -4122,7 +4121,6 @@ class App(*_APP_BASES):
         save_config(self.cfg)
         if hasattr(self, "_app_row_detail") and self._app_row_detail.winfo_exists():
             self._app_row_detail.configure(text="Re-checking for updates...")
-            self._app_update_btn.pack_forget()
         threading.Thread(target=self._check_app_update_thread, daemon=True).start()
 
     def _check_app_update_thread(self):
@@ -4138,26 +4136,98 @@ class App(*_APP_BASES):
             return
         self._app_row_detail.configure(text=info.get("detail", ""))
         self._app_row_dot.configure(text_color="#c0392b" if info.get("update_available") else "#2fa84f")
-        if info.get("update_available"):
-            self._app_update_btn.pack(side="left")
-        else:
-            self._app_update_btn.pack_forget()
+        # The button is always shown (it's the dedicated app download/update
+        # button). Only its label changes: "Update" when an in-place update is
+        # waiting, "Download" otherwise (e.g. to grab a separate beta copy).
+        if self._app_update_btn.winfo_exists():
+            self._app_update_btn.configure(
+                text="Update" if info.get("update_available") else "Download")
 
     def _app_update_clicked(self):
-        info = getattr(self, "_app_update_info", None)
-        if not info or not info.get("update_available"):
-            messagebox.showinfo("Update", "No update is available right now.")
+        from core.app_update import is_frozen
+        info = getattr(self, "_app_update_info", None) or {}
+        beta = bool(self._app_beta_var.get())
+        latest = info.get("latest")
+        latest_txt = latest or "(couldn't check)"
+        latest_url = info.get("latest_url") or info.get("url")
+        update_available = bool(info.get("update_available"))
+
+        if not is_frozen():
+            messagebox.showinfo(
+                "Media Downloader",
+                "You're running from source - update with 'git pull' in the repo.")
+            return
+
+        if beta:
+            choice = messagebox.askyesnocancel(
+                "Beta build",
+                "You have Beta builds turned on.\n\n"
+                f"Latest beta: {latest_txt}\n\n"
+                "Yes  - install it as a SEPARATE copy (your current install is left "
+                "alone; pick a different folder in the setup wizard).\n"
+                "No   - update THIS copy in place (Media Downloader closes to install).\n"
+                "Cancel - do nothing.")
+            if choice is None:
+                return
+            if not latest_url:
+                messagebox.showinfo("Media Downloader",
+                                    "Couldn't find a download link for the latest beta.")
+                return
+            if choice:  # Yes -> separate copy
+                threading.Thread(target=self._download_app_instance,
+                                 args=(latest_url, latest), daemon=True).start()
+            else:       # No -> in-place update
+                threading.Thread(
+                    target=self._run_dependency_action,
+                    args=({"name": "Media Downloader", "kind": "app",
+                           "url": latest_url, "latest": latest},), daemon=True).start()
+            return
+
+        # Beta off - plain in-place update, only when one is actually available.
+        if not update_available:
+            messagebox.showinfo("Media Downloader",
+                                info.get("detail", "You're on the latest version."))
             return
         if not messagebox.askyesno(
                 "Update Media Downloader",
-                f"Download and install version {info['latest']}?\n\n"
+                f"Download and install version {latest}?\n\n"
                 "Media Downloader will close so the installer can replace it, "
                 "then reopen when the installer finishes."):
             return
         threading.Thread(target=self._run_dependency_action,
                          args=({"name": "Media Downloader", "kind": "app",
-                                "url": info.get("url"), "latest": info.get("latest")},),
+                                "url": info.get("url") or latest_url, "latest": latest},),
                          daemon=True).start()
+
+    def _download_app_instance(self, url, version):
+        """Beta 'install as a separate copy' path: download the installer,
+        reveal it in Explorer, and leave it to the user to run - the app is
+        NOT closed and the current install is NOT touched."""
+        from core import app_update
+        self._threadsafe_log(f"Downloading Media Downloader {version or ''} installer...",
+                             color="blue")
+
+        def prog(got, total):
+            self.after(0, lambda: self._set_progress(got / total if total else 0, None))
+
+        path, err = app_update.download_installer(url, progress_callback=prog)
+        self.after(0, lambda: self._set_progress(0, None))
+        if err:
+            self._threadsafe_log(err, color="red")
+            self.after(0, lambda: messagebox.showerror("Download failed", err))
+            return
+        self._threadsafe_log(f"Installer saved to {path}", color="blue")
+        try:
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        except Exception:
+            pass
+        self.after(0, lambda: messagebox.showinfo(
+            "Installer downloaded",
+            f"The installer for {version or 'the latest beta'} was saved to:\n\n"
+            f"{path}\n\n"
+            "Run it to install a second copy. When the setup wizard asks where to "
+            "install, choose a different folder from your current copy so the two "
+            "don't overwrite each other."))
 
     def _do_app_update(self, item):
         """Shared by the app-row Update button and Update All. Downloads the

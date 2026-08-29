@@ -81,12 +81,14 @@ def check_app_update(current_version, include_beta=False, timeout=10):
         current       - the running version string
         latest        - newest version in the selected channel (or None)
         url           - installer download URL for `latest` (frozen builds only)
+        latest_url     - installer URL for `latest` regardless of whether it's
+                         newer (frozen builds only); used for "get a separate copy"
         update_available - True when latest is newer than current AND we can install it
         detail        - one-line human summary for the Version tab row
     """
     result = {
         "ok": True, "checked": False, "current": current_version,
-        "latest": None, "url": None, "update_available": False,
+        "latest": None, "url": None, "latest_url": None, "update_available": False,
         "detail": "Couldn't check for updates (no connection?).",
     }
     manifest = fetch_manifest(timeout=timeout)
@@ -101,6 +103,8 @@ def check_app_update(current_version, include_beta=False, timeout=10):
 
     latest = newest.get("version")
     result["latest"] = latest
+    if is_frozen():
+        result["latest_url"] = newest.get("url")
     cur_k, lat_k = _version_key(current_version), _version_key(latest)
 
     if lat_k <= cur_k:
