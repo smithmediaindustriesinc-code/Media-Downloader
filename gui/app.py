@@ -31,11 +31,12 @@ from core.downloader import (Downloader, DownloadCancelled, DownloadStageError, 
 from core.error_popup import show_error
 from core.download_requests import (start_request, update_item, finish_request, add_item_to_request,
                                      reopen_for_retry, get_all_requests, get_request, delete_request,
-                                     find_previous_download)
+                                     find_previous_download, set_recording as _set_requests_recording)
 from core.utils import (open_folder, open_file, make_unique_name, sanitize_filename,
                          beautify_title, weighted_match_score, strip_leading_special,
                          list_files, move_files, format_file_size)
-from core.history import load_history, add_entry, update_entry, clear_history, delete_entry
+from core.history import (load_history, add_entry, update_entry, clear_history, delete_entry,
+                          set_recording as _set_history_recording)
 from core.playlists import (list_playlists, create_playlist, delete_playlist, playlist_path,
                              playlist_contents, add_file_to_playlist, remove_file_from_playlist,
                              ensure_playlists_root, import_folder_as_playlist)
@@ -270,6 +271,7 @@ class App(*_APP_BASES):
         self._restore_draft_fields()
         self._recover_interrupted_downloads()
         self._ensure_download_root_in_library()  # A9: download folder is a library folder by default
+        self._apply_recording_state()  # 1.6.4: honour "Save to Requests / History" from the start
         self._wire_drag_and_drop()  # 1.6.1: drag a video thumbnail from a browser -> URL field
 
     RESOLUTION_PRESETS_BASE = [
@@ -727,6 +729,15 @@ class App(*_APP_BASES):
                                                     font=self.font_normal, width=220)
         self.aspect_dropdown.grid(row=1, column=1, sticky="w", padx=15, pady=(4, 4))
 
+        # When off, this download is not written to Request History or the
+        # History tab (core.download_requests / core.history recording is
+        # switched off for the run). See _on_save_download_info_changed.
+        self.save_info_var = ctk.BooleanVar(value=self.cfg.get("save_download_info", True))
+        self.save_info_switch = ctk.CTkSwitch(
+            shared, text="Save to Requests / History", font=self.font_normal,
+            variable=self.save_info_var, command=self._on_save_download_info_changed)
+        self.save_info_switch.grid(row=1, column=2, columnspan=2, sticky="e", padx=15, pady=(4, 4))
+
         ctk.CTkLabel(shared, text="Output folder (blank = default)", font=self.font_label).grid(
             row=2, column=0, columnspan=4, sticky="w", padx=15, pady=(10, 2))
         out_row = ctk.CTkFrame(shared, fg_color="transparent")
@@ -1015,6 +1026,23 @@ class App(*_APP_BASES):
         self.cfg["dynamic_batch_queue_enabled"] = self.dynamic_batch_queue_var.get()
         save_config(self.cfg)
         self._apply_batch_queue_mode()
+
+    def _apply_recording_state(self):
+        """Push the 'Save to Requests / History' setting into the two
+        recording modules. Called once at startup and whenever the toggle
+        flips."""
+        on = bool(self.cfg.get("save_download_info", True))
+        _set_requests_recording(on)
+        _set_history_recording(on)
+
+    def _on_save_download_info_changed(self):
+        on = bool(self.save_info_var.get())
+        self.cfg["save_download_info"] = on
+        save_config(self.cfg)
+        self._apply_recording_state()
+        self._log("Downloads will be saved to Requests / History."
+                  if on else
+                  "Save download info is OFF - downloads won't be recorded to Requests or History.")
 
     def _clear_batch_queue(self):
         self.batch_box.delete("1.0", "end")

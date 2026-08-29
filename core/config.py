@@ -115,6 +115,11 @@ DEFAULT_CONFIG = {
                             # a scrollable list of individually-
                             # removable URL rows with undo support (see
                             # gui/app.py's _refresh_batch_dynamic_list). On by default as of 1.6.0.
+    "save_download_info": True,  # Download tab toggle - when off, a
+                            # download is NOT recorded to Request History
+                            # or the History tab (core.download_requests /
+                            # core.history recording is switched off). On
+                            # by default. Added 1.6.4.
 }
 
 

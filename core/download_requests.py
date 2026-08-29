@@ -35,6 +35,17 @@ REQUESTS_PATH = os.path.join(REQUESTS_DIR, "download_requests.json")
 
 _lock = threading.Lock()
 
+# When False (GUI "Save download info" toggle), start_request returns None
+# and writes nothing; update_item / finish_request / add_item_to_request
+# already no-op on an unknown request_id, so None flows through harmlessly.
+_RECORDING = True
+
+
+def set_recording(enabled):
+    global _RECORDING
+    _RECORDING = bool(enabled)
+
+
 REQUEST_TYPES = {
     ("Video", "single"): "video_download",
     ("Audio", "single"): "audio_download",
@@ -82,7 +93,9 @@ def start_request(dtype, mode, urls, custom_name=None, out_dir=None):
     (e.g. from the Batch Queue tab's optional rename field), is shown in
     the Extras tab's Request History instead of the first item's title -
     purely a display label, doesn't affect the request id scheme.
-    Returns the new request_id."""
+    Returns the new request_id, or None when recording is turned off."""
+    if not _RECORDING:
+        return None
     with _lock:
         data = _load()
         type_key = request_type_key(dtype, mode)
@@ -153,6 +166,8 @@ def reset_stalled_downloads(new_status="pending", error=None):
 
 def update_item(request_id, url, **fields):
     """Update one URL's status/fields within an in-progress request."""
+    if request_id is None:
+        return
     with _lock:
         data = _load()
         req = data["requests_in_progress"].get(request_id)
@@ -167,6 +182,8 @@ def add_item_to_request(request_id, url):
     already exists, being retried) as a fresh pending entry, or adds it if
     somehow missing. Works on completed requests too (retry re-opens them
     briefly, see retry_single_url in gui/app.py)."""
+    if request_id is None:
+        return
     with _lock:
         data = _load()
         for bucket in ("requests_in_progress", "requests_completed"):
@@ -187,6 +204,8 @@ def finish_request(request_id):
     'success' (all succeeded), 'partial' (mixed), or 'failed' (all failed).
     Safe to call even if some items are still 'pending'/'downloading' -
     it will simply not move the request yet in that case."""
+    if request_id is None:
+        return None
     with _lock:
         data = _load()
         req = data["requests_in_progress"].get(request_id)

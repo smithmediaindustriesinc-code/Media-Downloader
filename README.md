@@ -106,6 +106,12 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.4
+
+- New **"Save to Requests / History"** toggle on the Download tab. When it's
+  off, a download runs normally but is not recorded to Request History or the
+  History tab. On by default.
+
 ### 1.6.3
 
 - The **Batch Queue** dynamic URL list now shows a live count of what's queued

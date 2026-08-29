@@ -7,6 +7,16 @@ from core.paths import app_dir
 HISTORY_PATH = os.path.join(app_dir(), "history", "history.json")
 MAX_ENTRIES = 300
 
+# When False (set from the GUI's "Save download info" toggle), add_entry
+# is a no-op that returns None and update_entry silently does nothing, so a
+# download leaves no trace in history. Reads (load_history) are unaffected.
+_RECORDING = True
+
+
+def set_recording(enabled):
+    global _RECORDING
+    _RECORDING = bool(enabled)
+
 
 def load_history():
     if os.path.exists(HISTORY_PATH):
@@ -42,7 +52,12 @@ def add_entry(url, name, dtype, path, status="Success"):
     """Creates a new history entry and returns its id - callers that
     want to update this SAME entry later (rather than creating a
     duplicate one) as a download progresses through stages should hold
-    onto that id and pass it to update_entry()."""
+    onto that id and pass it to update_entry().
+
+    Returns None (and writes nothing) when recording is turned off - all
+    the update_entry(None, ...) calls that follow are then harmless."""
+    if not _RECORDING:
+        return None
     history = load_history()
     entry_id = str(uuid.uuid4())
     history.insert(0, {
@@ -67,6 +82,8 @@ def update_entry(entry_id, **fields):
     cleared mid-download) rather than erroring - this is always called
     from a background download thread where raising would be awkward to
     handle usefully."""
+    if entry_id is None or not _RECORDING:
+        return False
     history = load_history()
     for entry in history:
         if entry.get("id") == entry_id:
