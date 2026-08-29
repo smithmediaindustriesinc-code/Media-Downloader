@@ -78,8 +78,9 @@ _DND_HTML = "DND_HTML"   # -> CF_HTML, {HTML Format}
 _DND_DROP_TYPES = (_DND_URL, _DND_HTML, _DND_TEXT)
 
 URL_PATTERN = re.compile(r"https?://\S+")
-# DEV_USERNAME / DEV_PASSWORD now live in core/dev_access.py, which also
-# handles any additionally-granted developer accounts - see check_dev_credentials.
+# The built-in developer login and any additionally-granted accounts live in
+# core/dev_access.py. The password is stored there as a salted PBKDF2 hash
+# (not plaintext) - see check_dev_credentials / grant_dev_access.
 FONT_FAMILIES = ["Segoe UI", "Arial", "Calibri", "Verdana", "Tahoma", "Consolas",
                   "Courier New", "Georgia", "Trebuchet MS", "Comic Sans MS", "Times New Roman"]
 FONT_SIZES = [11, 12, 13, 14, 15, 16, 18, 20, 22, 24]

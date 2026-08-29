@@ -106,6 +106,10 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.6.2
+
+- Developer-unlock credentials rotated and stored as a salted PBKDF2 hash instead of plaintext.
+
 ### 1.6.1
 
 - **Drag a video thumbnail straight onto the window.** Drag a thumbnail (or a
