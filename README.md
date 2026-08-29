@@ -106,6 +106,26 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.7.0
+
+Rolls up the whole 1.6.x line (1.6.1–1.6.10) into one release. Highlights:
+
+- **Drag a video thumbnail from your browser onto the window** to queue it (1.6.1).
+- **VLC is back** — "Open in VLC" alongside "Open file"; the Version tab links you to
+  get VLC instead of auto-downloading it (1.6.5).
+- **Update Media Downloader from inside the Version tab** (1.6.10).
+- **"View a request" is an in-app page now**, not a pop-up window (1.6.9).
+- **Optional "pre-fetch file sizes" for batches** → size-based, not count-based, ETAs
+  for the queue and for single downloads (1.6.8).
+- **Redownload** a successful item; per-request **"Retry failed"**; the retry counter
+  resumes where the request left off (1.6.7).
+- Per-row **Delete** on History; a **"Save to Requests / History"** toggle; a live
+  **queue count** in the dynamic Batch Queue; the top mini-log mirrors the real log
+  exactly (1.6.2–1.6.6).
+- Developer-unlock credentials are now a salted PBKDF2 hash, not plaintext (1.6.2).
+
+Full per-version detail below.
+
 ### 1.6.10
 
 - **Update Media Downloader from inside the app.** The Version tab now lists
