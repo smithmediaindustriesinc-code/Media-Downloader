@@ -79,22 +79,25 @@ def _find_exe_asset(assets, version, beta=False):
     if not assets:
         return None, None
 
-    name_pattern = f"MediaDownloaderSetup{version}"
     if beta:
-        name_pattern += "-beta"
-    name_pattern += ".exe"
+        # The "-beta" side-by-side installer. Match by name only - there is
+        # NO fallback: if a release has no *-beta.exe asset it simply has no
+        # beta variant (do not fall back to the normal installer).
+        for asset in assets:
+            name = asset.get("name", "")
+            if name.endswith("-beta.exe") and name.startswith("MediaDownloaderSetup"):
+                return asset, asset.get("browser_download_url")
+        return None, None
 
-    # Try exact match first
+    exact = f"MediaDownloaderSetup{version}.exe"
     for asset in assets:
-        if asset.get("name") == name_pattern:
+        if asset.get("name") == exact:
             return asset, asset.get("browser_download_url")
 
-    # Fall back to first .exe (excluding -beta if not beta)
+    # Fall back to the first non-beta .exe.
     for asset in assets:
         name = asset.get("name", "")
-        if name.endswith(".exe"):
-            if not beta and "-beta" in name:
-                continue
+        if name.endswith(".exe") and "-beta" not in name:
             return asset, asset.get("browser_download_url")
 
     return None, None
