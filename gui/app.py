@@ -34,7 +34,7 @@ from core.error_popup import show_error
 from core.download_requests import (start_request, update_item, finish_request, add_item_to_request,
                                      reopen_for_retry, get_all_requests, get_request, delete_request,
                                      find_previous_download, set_recording as _set_requests_recording)
-from core.utils import (open_folder, open_file, open_in_vlc, open_media_smart, make_unique_name,
+from core.utils import (open_folder, open_file, open_media, open_in_vlc, open_media_smart, make_unique_name,
                          sanitize_filename, beautify_title, weighted_match_score, strip_leading_special,
                          list_files, move_files, format_file_size)
 from core.history import (load_history, add_entry, update_entry, clear_history, delete_entry,
@@ -773,9 +773,6 @@ class App(*_APP_BASES):
         ctk.CTkButton(out_row, text="Open file", width=95, font=self.font_normal,
                       fg_color="gray40", hover_color="gray30",
                       command=self.open_output_file).grid(row=0, column=4, padx=(0, 6))
-        ctk.CTkButton(out_row, text="Open in VLC", width=95, font=self.font_normal,
-                      **VLC_BUTTON_COLORS,
-                      command=self.open_output_in_vlc).grid(row=0, column=5)
 
         playlist_out_row = ctk.CTkFrame(shared, fg_color="transparent")
         playlist_out_row.grid(row=4, column=0, columnspan=4, sticky="ew", padx=15, pady=(0, 12))
@@ -3101,8 +3098,6 @@ class App(*_APP_BASES):
                     side="left", padx=(0, 8))
             ctk.CTkButton(row, text="Open", width=55, font=self.font_small,
                           command=lambda p=full_path: self._open_media_or_warn(p)).pack(side="left", padx=4)
-            ctk.CTkButton(row, text="VLC", width=45, font=self.font_small, **VLC_BUTTON_COLORS,
-                          command=lambda p=full_path: self._open_in_vlc_or_warn(p)).pack(side="left", padx=(0, 4))
             ctk.CTkButton(row, text="Location", width=70, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
                           command=lambda p=full_path: self._open_or_warn(os.path.dirname(p))).pack(
@@ -3137,13 +3132,56 @@ class App(*_APP_BASES):
             return
         messagebox.showwarning("VLC", msg)
 
+    def _set_media_player(self, path):
+        path = (path or "").strip()
+        self.cfg["media_player_path"] = path
+        save_config(self.cfg)
+        if hasattr(self, "media_player_entry"):
+            self.media_player_entry.delete(0, "end")
+            self.media_player_entry.insert(0, path)
+        self._refresh_media_player_status()
+
+    def _browse_media_player(self):
+        p = filedialog.askopenfilename(
+            title="Choose a media player",
+            filetypes=[("Programs", "*.exe"), ("All files", "*.*")])
+        if p:
+            self._set_media_player(p)
+
+    def _use_vlc_as_player(self):
+        vlc_ok, vlc_path = deps.check_vlc()
+        if vlc_ok and vlc_path:
+            self._set_media_player(vlc_path)
+        else:
+            if messagebox.askyesno("VLC not found",
+                                    "VLC isn't installed. Open the VLC download page?"):
+                webbrowser.open(VLC_DOWNLOAD_PAGE)
+
+    def _clear_media_player(self):
+        self._set_media_player("")
+
+    def _refresh_media_player_status(self):
+        if not hasattr(self, "media_player_status"):
+            return
+        p = (self.cfg.get("media_player_path", "") or "").strip()
+        if not p:
+            self.media_player_status.configure(
+                text="Using your system's default app for each file type.", text_color="gray55")
+        elif os.path.isfile(p):
+            self.media_player_status.configure(text=f"Opening files with: {p}",
+                                               text_color="#2fa84f")
+        else:
+            self.media_player_status.configure(
+                text=f"Not found: {p}  (files will open with the system default)",
+                text_color="#d68910")
+
     def _open_media_or_warn(self, path):
-        """Opens the file with the OS's own
-        default app for its type. A
-        genuine permissions problem gets the same elevated-access
-        redirect offer as _open_with_permission_redirect, rather than
-        just a plain "couldn't open this" warning with no path forward."""
-        ok, msg = open_file(path)
+        """Opens the file with the user's chosen media player (Settings ->
+        Advanced -> 'Media player'; blank = the OS default app). A genuine
+        permissions problem gets the same elevated-access redirect offer as
+        _open_with_permission_redirect, rather than just a plain "couldn't
+        open this" warning with no path forward."""
+        ok, msg = open_media(path, self.cfg.get("media_player_path", ""))
         if ok:
             return
         if msg == "permission_denied":
@@ -3311,13 +3349,10 @@ class App(*_APP_BASES):
             ctk.CTkButton(row, text="Open", width=60, font=self.font_small,
                           command=lambda p=item["path"]: self._open_media_or_warn(p)).grid(
                 row=0, column=1, rowspan=2, padx=6)
-            ctk.CTkButton(row, text="VLC", width=45, font=self.font_small, **VLC_BUTTON_COLORS,
-                          command=lambda p=item["path"]: self._open_in_vlc_or_warn(p)).grid(
-                row=0, column=2, rowspan=2, padx=(0, 6))
             ctk.CTkButton(row, text="Location", width=75, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
                           command=lambda p=item["path"]: self._open_or_warn(os.path.dirname(p))).grid(
-                row=0, column=3, rowspan=2, padx=(0, 6))
+                row=0, column=2, rowspan=2, padx=(0, 6))
             ctk.CTkButton(row, text="Archive", width=70, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
                           command=lambda p=item["path"], n=item["name"]: self._archive_library_file(p, n)).grid(
@@ -3634,14 +3669,11 @@ class App(*_APP_BASES):
                           fg_color="gray40", hover_color="gray30",
                           command=lambda p=path: self._open_media_or_warn(p)).grid(
                 row=0, column=col + 2, rowspan=2, padx=(0, 6))
-            ctk.CTkButton(row, text="VLC", width=45, font=self.font_small, **VLC_BUTTON_COLORS,
-                          command=lambda p=path: self._open_in_vlc_or_warn(p)).grid(
-                row=0, column=col + 3, rowspan=2, padx=(0, 6))
             ctk.CTkButton(row, text="Delete", width=60, font=self.font_small,
                           fg_color="#a13333", hover_color="#7d2626",
                           command=lambda eid=entry.get("id"), nm=entry.get("name", ""):
                               self._delete_history_entry_clicked(eid, nm)).grid(
-                row=0, column=col + 4, rowspan=2, padx=(0, 10))
+                row=0, column=col + 3, rowspan=2, padx=(0, 10))
 
     def _delete_history_entry_clicked(self, entry_id, name):
         """Per-row delete for a single History entry - removes just that
@@ -3957,6 +3989,30 @@ class App(*_APP_BASES):
                              "download begins - you can Cancel during the pass. Off by default.").pack(
             side="left", padx=(8, 0))
 
+        self._sub_header(scroll, "Media player")
+        ctk.CTkLabel(scroll, text="Which app the \"Open file\" buttons use. Blank = your "
+                     "system's default. Point it at VLC / MPC-HC / PotPlayer etc. to always "
+                     "open there.", font=self.font_small, text_color="gray60",
+                     wraplength=self._slider_width() + 260, justify="left").pack(
+            anchor="w", padx=5, pady=(0, 4))
+        mp_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        mp_row.pack(fill="x", padx=5, pady=(0, 4))
+        mp_row.grid_columnconfigure(0, weight=1)
+        self.media_player_entry = ctk.CTkEntry(mp_row, font=self.font_normal,
+                                               placeholder_text="System default")
+        self.media_player_entry.insert(0, self.cfg.get("media_player_path", "") or "")
+        self.media_player_entry.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(mp_row, text="Browse...", width=90, font=self.font_normal,
+                      command=self._browse_media_player).grid(row=0, column=1, padx=(6, 0))
+        ctk.CTkButton(mp_row, text="Use VLC", width=80, font=self.font_normal,
+                      command=self._use_vlc_as_player).grid(row=0, column=2, padx=(6, 0))
+        ctk.CTkButton(mp_row, text="System default", width=110, font=self.font_normal,
+                      fg_color="gray40", hover_color="gray30",
+                      command=self._clear_media_player).grid(row=0, column=3, padx=(6, 0))
+        self.media_player_status = ctk.CTkLabel(scroll, text="", font=self.font_small, anchor="w")
+        self.media_player_status.pack(anchor="w", padx=5, pady=(0, 15))
+        self._refresh_media_player_status()
+
         # "Import from Spotify" lives under Advanced (it's power-user setup:
         # a Spotify Client ID, a redirect port, match/tagging toggles).
         self._sub_header(scroll, "Import from Spotify")
@@ -4175,12 +4231,15 @@ class App(*_APP_BASES):
         self.cfg["font_family"] = self.font_family_var.get()
         self.cfg["font_size"] = int(self.font_size_var.get())
         self.cfg["bold_text"] = self.bold_var.get()
+        if hasattr(self, "media_player_entry"):
+            self.cfg["media_player_path"] = self.media_player_entry.get().strip()
         save_config(self.cfg)
         self._build_fonts()
         # Apply the new default toggles to the current Download tab too
         self.aspect_var.set(self.cfg["aspect_ratio"])
         self.playlist_var.set(self.cfg["default_playlist"])
         self.subtitles_var.set(self.cfg["default_subtitles"])
+        self._refresh_media_player_status()
         self._log("Settings saved. Restart the app for font/color theme changes to fully apply.")
         self._set_inline_status(self.save_settings_status_label, "Settings saved.", "success")
 

@@ -52,6 +52,33 @@ def open_file(path):
         return False, str(e)
 
 
+def open_media(path, player_path=""):
+    """Open `path` with the user's chosen media player (Settings ->
+    'Media player'). `player_path` empty / "system" -> the OS default app
+    (same as open_file). Otherwise it's an executable to launch as
+    `<player> "<path>"` - with VLC's play-immediately flags added when the
+    exe looks like VLC. Returns (ok, message)."""
+    if not path or not os.path.isfile(path):
+        return False, "File not found."
+    p = (player_path or "").strip().strip('"')
+    if not p or p.lower() == "system":
+        return open_file(path)
+    if not os.path.isfile(p):
+        # fall back rather than fail outright
+        ok, msg = open_file(path)
+        return ok, (msg if ok else f"Media player not found at {p}; used the "
+                                   f"system default instead ({msg}).")
+    try:
+        args = [p]
+        if "vlc" in os.path.basename(p).lower():
+            args += ["--play-and-exit", "--no-one-instance"]
+        args.append(path)
+        subprocess.Popen(args)
+        return True, ""
+    except Exception as e:
+        return False, f"Could not launch the media player: {e}"
+
+
 def open_in_vlc(path):
     """Open a file or folder with VLC, playing it immediately. Returns
     (ok, message).

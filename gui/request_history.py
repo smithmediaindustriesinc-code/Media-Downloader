@@ -630,6 +630,16 @@ def _build_item_row(app, parent, request_id, url, item, render_callback, parent_
     btns.grid(row=0, column=col + 2, rowspan=2, padx=10)
     ctk.CTkButton(btns, text="Copy Link", width=85, font=app.font_small, fg_color="gray40", hover_color="gray30",
                   command=lambda u=url: _copy_link(app, u)).pack(side="left", padx=(0, 6))
+    # Open the downloaded file / its folder straight from the request view
+    # (issue #19). Shown only once the item has a real saved path.
+    _p = item.get("path")
+    if _p:
+        ctk.CTkButton(btns, text="Open", width=55, font=app.font_small, fg_color="gray40",
+                      hover_color="gray30",
+                      command=lambda p=_p: app._open_media_or_warn(p)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btns, text="Folder", width=60, font=app.font_small, fg_color="gray40",
+                      hover_color="gray30",
+                      command=lambda p=_p: app._open_or_warn(os.path.dirname(p))).pack(side="left", padx=(0, 6))
     # For a successful item the button becomes "Redownload" (still
     # enabled) - the common reason to want it is that the file was
     # deleted; it fetches again into the request's original out_dir,
