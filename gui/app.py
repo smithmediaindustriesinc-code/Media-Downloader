@@ -669,6 +669,7 @@ class App(*_APP_BASES):
         # below, since Version needs to stay last).
         tab_download = self.tabview.add("Download")
         tab_media = self.tabview.add("Media")
+        tab_import = self.tabview.add("Import")
         tab_history = self.tabview.add("History")
         tab_settings = self.tabview.add("Settings")
         tab_more = self.tabview.add("More")
@@ -676,6 +677,8 @@ class App(*_APP_BASES):
 
         self._build_download_tab(tab_download)
         self._build_media_tab(tab_media)
+        from gui.music_import import build_import_tab
+        build_import_tab(self, tab_import)
         self._build_history_tab(tab_history)
         self._build_settings_tab(tab_settings)
         self._build_more_tab(tab_more)
@@ -697,6 +700,7 @@ class App(*_APP_BASES):
         # actually exists (it's added dynamically, well after this runs).
         self._apply_tab_icon("Download")
         self._apply_tab_icon("Media")
+        self._apply_tab_icon("Import")
         self._apply_tab_icon("History")
         self._apply_tab_icon("Settings")
         self._apply_tab_icon("More")
@@ -2392,6 +2396,82 @@ class App(*_APP_BASES):
                                   "ETAs will use the item-count estimate.", color="blue")
 
     # ------------------------------------------------------------------ #
+    def _start_music_import_download(self, session, picked, urls, tag_map,
+                                     existing_import_id=None):
+        """Hand a resolved Spotify/pasted import to the normal batch queue.
+        `tag_map` is {youtube_url: TrackRef} - _maybe_tag_music_track() writes
+        the real metadata onto each file as it finishes."""
+        if self.batch_running:
+            messagebox.showinfo("Import", "A download is already running - wait for it "
+                                "to finish, then start the import.")
+            return
+        self._music_tag_map = dict(tag_map)
+
+        out_dir = self._resolve_output_dir() or ""
+        try:
+            from core import music_import
+            rec = music_import.record_from_session(session, out_dir, [])
+            if existing_import_id:
+                rec["id"] = existing_import_id
+            music_import.save_import(rec)
+            self._music_import_record_id = rec["id"]
+        except Exception:
+            self._music_import_record_id = None
+
+        # Fill the queue (dynamic list or the plain textbox) + name it.
+        if self.cfg.get("dynamic_batch_queue_enabled", False):
+            self._batch_urls = list(urls)
+            self._batch_undo_stack = []
+            self._refresh_batch_dynamic_list()
+        else:
+            self.batch_box.delete("1.0", "end")
+            self.batch_box.insert("1.0", "\n".join(urls))
+        try:
+            self.queue_name_entry.delete(0, "end")
+            self.queue_name_entry.insert(0, (session.name or "Spotify import")[:60])
+        except Exception:
+            pass
+
+        self.tabview.set("Download")
+        try:
+            self.inner_tabview.set("Batch Queue")
+        except Exception:
+            pass
+        self._log(f"Music import: queued {len(urls)} track(s) from \"{session.name}\". "
+                  f"Audio is a YouTube match - tags come from the source metadata.")
+        self.start_batch_download()
+
+    def _maybe_tag_music_track(self, url, path):
+        """Post-download hook: if `url` came from a music import, write the
+        TrackRef's tags (+ cover + lyrics) onto the downloaded file and record
+        the file path in music_imports.json. Never disrupts the batch."""
+        ref = getattr(self, "_music_tag_map", {}).get(url)
+        if not ref or not path:
+            return
+        try:
+            from core import tagging, music_import
+            lyrics = None
+            if self.cfg.get("music_embed_lyrics", True):
+                lyrics = tagging.fetch_lyrics(ref)
+            ok, msg = tagging.write_tags(
+                path, ref,
+                embed_cover=self.cfg.get("music_embed_cover", True),
+                source_comment=self.cfg.get("music_tag_source_comment", True),
+                lyrics=lyrics)
+            self._threadsafe_log(("Tagged: " if ok else "Tagging skipped: ") + msg,
+                                 color=None if ok else "red")
+            rid = getattr(self, "_music_import_record_id", None)
+            if rid:
+                rec = music_import.get_import(rid)
+                if rec:
+                    for trow in rec.get("tracks", []):
+                        if trow.get("yt_url") == url and not trow.get("file"):
+                            trow["file"] = path
+                            break
+                    music_import.save_import(rec)
+        except Exception as e:
+            self._threadsafe_log(f"Could not tag {path}: {e}", color="red")
+
     def start_batch_download(self):
         if self.cfg.get("dynamic_batch_queue_enabled", False):
             urls = list(self._batch_urls)
@@ -2532,6 +2612,7 @@ class App(*_APP_BASES):
                     self._threadsafe_log(f"Saved: {path}")
                     update_item(request_id, url, status="success", path=path,
                                 elapsed_seconds=self.downloader.elapsed_seconds())
+                    self._maybe_tag_music_track(url, path)
                 except DownloadCancelled:
                     self._threadsafe_log("Batch cancelled.")
                     status = "Cancelled"
@@ -2598,6 +2679,8 @@ class App(*_APP_BASES):
             self.batch_running = False
             self._batch_current_url = None
             self._prefetch_cancel = None
+            self._music_tag_map = {}
+            self._music_import_record_id = None
             finish_request(request_id)
             self.after(0, lambda: self._set_downloading_state(False, batch=True))
             self.after(0, self._refresh_history_tab)
@@ -3788,6 +3871,13 @@ class App(*_APP_BASES):
                              "delay), so on a large playlist it can take a few minutes before the first "
                              "download begins - you can Cancel during the pass. Off by default.").pack(
             side="left", padx=(8, 0))
+
+        # ============================================================ #
+        # IMPORT FROM SPOTIFY
+        # ============================================================ #
+        self._section_header(scroll, "Import from Spotify")
+        from gui.music_import import build_spotify_settings_section
+        build_spotify_settings_section(self, scroll).pack(fill="x", padx=5, pady=(0, 15))
 
         # ============================================================ #
         # ACCESSIBILITY
