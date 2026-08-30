@@ -106,6 +106,32 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.7.2
+
+Spotify polish + a round of bug fixes (GitHub issues).
+
+- **Your Spotify playlists.** "Import from Spotify" now lists your own +
+  followed playlists (and Liked Songs) - one click to download. The Import
+  **tab** is gone; it's a dialog opened from the Download tab now (pasting a
+  Spotify link into Single / Batch still works).
+- **Spotify imports download audio-only** by default (smaller, faster - it's
+  music). A toggle in the Spotify settings switches to the music video.
+- **Media player setting** (Settings → Advanced) - the "Open file" buttons
+  use your chosen player (VLC / MPC-HC / …) or the system default. The
+  separate "Open in VLC" buttons are gone. Request History rows gained
+  Open / Folder buttons. *(#15, #19)*
+- **Version tab: Refresh button.**
+- **Settings can't be wiped by anything but an uninstall** - the uninstaller
+  now closes the app first so nothing rewrites the config afterwards. *(#2)*
+- **Cancel is reliable** even when pressed between queue items. *(#18)*
+- **"Current Download: …" line** under the top mini-log, plus an optional
+  "notify when a download finishes" (taskbar flash + beep). *(#21)*
+- Queued count is on the **Start button** now ("Start 5 downloads"). *(#22)*
+- Single-item **delete** is a two-click inline "Confirm?" - no pop-up. *(#20)*
+- **Retry / Redownload** button has an icon and is bigger. *(#14)*
+- Switching **Single ↔ Batch** carries the URL across. *(#17)*
+- Aspect ratio is a **Settings-only** option now ("Any" = native). *(#16)*
+
 ### 1.7.1
 
 - **Paste a Spotify link straight into the Download tab.** No need to switch
