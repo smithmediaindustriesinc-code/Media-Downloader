@@ -169,6 +169,13 @@ class App(*_APP_BASES):
         # crash_log.txt / _apply_network_status for what that looked
         # like in practice.
         self._closing = False
+        # Sticky "Cancel was pressed" flag. self.downloader can be None at the
+        # instant Cancel is pressed (between batch items, during the inter-item
+        # delay, before the first Downloader exists) - in which case
+        # downloader.cancel() does nothing and the queue would keep going.
+        # Every run loop also checks this flag; it's reset when a new download
+        # or batch starts. Issue #18.
+        self._cancel_requested = False
 
         from core.crash_log import install_tk_report_callback
         install_tk_report_callback(self)
@@ -2243,7 +2250,8 @@ class App(*_APP_BASES):
                 return
 
         for i, entry_url in enumerate(entry_urls, start=1):
-            if (self.downloader and self.downloader._cancel) or self._playlist_lookup_cancel.is_set():
+            if (self._cancel_requested or (self.downloader and self.downloader._cancel)
+                    or self._playlist_lookup_cancel.is_set()):
                 break  # _playlist_lookup_cancel also covers a Cancel between lookup and item 1
             self._batch_current_url = entry_url
             update_item(request_id, entry_url, status="downloading")
@@ -2349,10 +2357,11 @@ class App(*_APP_BASES):
             if status == "Success":
                 self._batch_item_durations.append(self.downloader.elapsed_seconds())
 
-            if delay_s and i < len(entry_urls) and not (self.downloader and self.downloader._cancel):
+            if delay_s and i < len(entry_urls) and not self._cancel_requested \
+                    and not (self.downloader and self.downloader._cancel):
                 waited = 0.0
                 while waited < delay_s:
-                    if self.downloader and self.downloader._cancel:
+                    if self._cancel_requested or (self.downloader and self.downloader._cancel):
                         break
                     time.sleep(min(0.25, delay_s - waited))
                     waited += 0.25
@@ -2628,7 +2637,8 @@ class App(*_APP_BASES):
                     return  # try/finally below resets batch_running + UI state
 
             for i, url in enumerate(urls, start=1):
-                if ((self.downloader and self.downloader._cancel)
+                if (self._cancel_requested
+                        or (self.downloader and self.downloader._cancel)
                         or (self._prefetch_cancel is not None and self._prefetch_cancel.is_set())):
                     break
                 self._batch_current_url = url
@@ -2745,10 +2755,11 @@ class App(*_APP_BASES):
                 # the fact. Skipped after the very last item (nothing left to
                 # wait for) and broken into small checks against cancel so a
                 # long delay doesn't make the Cancel button feel unresponsive.
-                if delay_s and i < total and not (self.downloader and self.downloader._cancel):
+                if delay_s and i < total and not self._cancel_requested \
+                        and not (self.downloader and self.downloader._cancel):
                     waited = 0.0
                     while waited < delay_s:
-                        if self.downloader and self.downloader._cancel:
+                        if self._cancel_requested or (self.downloader and self.downloader._cancel):
                             break
                         time.sleep(min(0.25, delay_s - waited))
                         waited += 0.25
@@ -2775,6 +2786,7 @@ class App(*_APP_BASES):
         self.batch_btn.configure(state=state)
         self.cancel_btn.configure(state="normal" if downloading else "disabled")
         if downloading:
+            self._cancel_requested = False  # fresh run - clear any earlier Cancel
             self._start_speed_display_tick()
         else:
             self._stop_speed_display_tick()
@@ -2787,6 +2799,7 @@ class App(*_APP_BASES):
             self._reset_batch_size_state()
 
     def cancel_download(self):
+        self._cancel_requested = True  # sticky - every run loop checks this
         lookup_cancel = getattr(self, "_playlist_lookup_cancel", None)
         if lookup_cancel is not None:
             lookup_cancel.set()  # abort a slow playlist-info lookup, if one is running
@@ -2795,6 +2808,7 @@ class App(*_APP_BASES):
             prefetch_cancel.set()  # abort a batch size pre-fetch pass, if one is running
         if self.downloader:
             self.downloader.cancel()
+        self._threadsafe_log("Cancelling...", color="red")
         self.cancel_btn.configure(state="disabled")
 
     def _threadsafe_log(self, message, level="simple", color=None):
