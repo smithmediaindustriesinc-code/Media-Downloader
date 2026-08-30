@@ -348,9 +348,11 @@ def _build_request_row(app, parent, req, status_key, mode, refresh_callback, sho
     ctk.CTkButton(btns, text="View", width=70, font=app.font_small,
                   command=lambda r=req: show_detail(r["request_id"])
                   ).pack(side="left", padx=(0, 6))
-    ctk.CTkButton(btns, text="Delete", width=70, font=app.font_small, fg_color="#a13333", hover_color="#7d2626",
-                  command=lambda r=req: _delete_request_clicked(r["request_id"], refresh_callback)
-                  ).pack(side="left")
+    _del = ctk.CTkButton(btns, text="Delete", width=75, font=app.font_small,
+                         fg_color="#a13333", hover_color="#7d2626")
+    _del.configure(command=lambda b=_del, rid=req["request_id"]: app._arm_delete(
+        b, lambda: _delete_request_now(rid, refresh_callback)))
+    _del.pack(side="left")
 
 
 def _retry_request_failed(app, req, failed_urls, refresh_callback):
@@ -380,6 +382,12 @@ def _retry_request_failed(app, req, failed_urls, refresh_callback):
         args=(app, [(request_id, u) for u in failed_urls], refresh_callback),
         kwargs={"counter_base": already_done, "counter_total": total},
         daemon=True).start()
+
+
+def _delete_request_now(request_id, refresh_callback):
+    """Inline two-click delete (#20) - the button already confirmed."""
+    delete_request(request_id)
+    refresh_callback()
 
 
 def _delete_request_clicked(request_id, refresh_callback):
@@ -645,12 +653,33 @@ def _build_item_row(app, parent, request_id, url, item, render_callback, parent_
     # deleted; it fetches again into the request's original out_dir,
     # exactly like a retry.
     is_success = status == "success"
-    retry_btn = ctk.CTkButton(btns, text="Redownload" if is_success else "Retry",
-                               width=90 if is_success else 65, font=app.font_small,
+    retry_btn = ctk.CTkButton(btns, text="  Redownload" if is_success else "  Retry",
+                               image=_retry_icon(app), compound="left", height=34,
+                               width=120 if is_success else 95, font=app.font_normal,
                                command=lambda u=url: _retry_url(app, request_id, u, render_callback,
                                                                  parent_refresh_callback, retry_btn))
     retry_btn.pack(side="left")
     return row
+
+
+_RETRY_ICON = None
+
+
+def _retry_icon(app):
+    """The circular-arrow retry icon (issue #14 - a picture, bigger button)."""
+    global _RETRY_ICON
+    if _RETRY_ICON is None:
+        try:
+            from core.paths import resource_path
+            from PIL import Image
+            _RETRY_ICON = ctk.CTkImage(Image.open(resource_path("assets/retry_icon.png")),
+                                       size=(18, 18))
+            # keep a hard ref alive (see gui/app.py's CTkImage note)
+            getattr(app, "_kept_images", []).append(_RETRY_ICON) if hasattr(app, "_kept_images") \
+                else setattr(app, "_kept_images", [_RETRY_ICON])
+        except Exception:
+            _RETRY_ICON = None
+    return _RETRY_ICON
 
 
 def _copy_link(app, url):

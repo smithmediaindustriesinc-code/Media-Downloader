@@ -1038,6 +1038,8 @@ class App(*_APP_BASES):
         # click, which could happen with focus anywhere in this frame,
         # not just while typing in the add-URL entry.
         self.bind_all("<Control-z>", self._on_ctrl_z_pressed)
+        # Any click anywhere disarms a pending inline "Confirm?" delete (#20).
+        self.bind_all("<Button-1>", self._global_click_disarm, add="+")
 
     def _on_ctrl_z_pressed(self, _event=None):
         if self.cfg.get("dynamic_batch_queue_enabled", False) and self.tabview.get() == "Download" \
@@ -3201,6 +3203,59 @@ class App(*_APP_BASES):
             return
         messagebox.showwarning("VLC", msg)
 
+    def _arm_delete(self, button, on_confirm):
+        """Issue #20 - a single-item delete is a two-click inline action, no
+        popup. First click -> the button becomes a red 'Confirm?'; second
+        click runs on_confirm(). It reverts after 4s, or the moment any other
+        click lands anywhere in the window, or another delete button is armed."""
+        if getattr(button, "_del_armed", False):
+            button._del_armed = False
+            self._disarm_delete()
+            on_confirm()
+            return
+        self._disarm_delete()
+        button._del_armed = True
+        try:
+            button._del_orig = (button.cget("text"), button.cget("fg_color"),
+                                button.cget("hover_color"))
+        except Exception:
+            button._del_orig = ("Delete", "#a13333", "#7d2626")
+        button.configure(text="Confirm?", fg_color="#c0392b", hover_color="#a83226")
+        self._armed_delete_btn = button
+        import time as _t
+        self._armed_delete_at = _t.time()
+        self._armed_delete_after = self.after(4000, self._disarm_delete)
+
+    def _disarm_delete(self, *_):
+        btn = getattr(self, "_armed_delete_btn", None)
+        if btn is not None:
+            try:
+                if btn.winfo_exists() and getattr(btn, "_del_armed", False):
+                    t, fg, hv = getattr(btn, "_del_orig", ("Delete", "#a13333", "#7d2626"))
+                    btn.configure(text=t, fg_color=fg, hover_color=hv)
+            except Exception:
+                pass
+            try:
+                btn._del_armed = False
+            except Exception:
+                pass
+        self._armed_delete_btn = None
+        aid = getattr(self, "_armed_delete_after", None)
+        if aid:
+            try:
+                self.after_cancel(aid)
+            except Exception:
+                pass
+        self._armed_delete_after = None
+
+    def _global_click_disarm(self, _event=None):
+        import time as _t
+        if getattr(self, "_armed_delete_btn", None) is None:
+            return
+        # ignore the arming click's own release (fires ~immediately)
+        if _t.time() - getattr(self, "_armed_delete_at", 0) > 0.35:
+            self._disarm_delete()
+
     def _set_media_player(self, path):
         path = (path or "").strip()
         self.cfg["media_player_path"] = path
@@ -3738,23 +3793,11 @@ class App(*_APP_BASES):
                           fg_color="gray40", hover_color="gray30",
                           command=lambda p=path: self._open_media_or_warn(p)).grid(
                 row=0, column=col + 2, rowspan=2, padx=(0, 6))
-            ctk.CTkButton(row, text="Delete", width=60, font=self.font_small,
-                          fg_color="#a13333", hover_color="#7d2626",
-                          command=lambda eid=entry.get("id"), nm=entry.get("name", ""):
-                              self._delete_history_entry_clicked(eid, nm)).grid(
-                row=0, column=col + 3, rowspan=2, padx=(0, 10))
-
-    def _delete_history_entry_clicked(self, entry_id, name):
-        """Per-row delete for a single History entry - removes just that
-        record (not the downloaded file). Confirms first, like Clear
-        History does."""
-        if entry_id is None:
-            return
-        label = f'"{name}"' if name else "this entry"
-        if messagebox.askyesno("Delete history entry",
-                               f"Remove {label} from the download history?\n\n"
-                               "This only removes the history record - the downloaded file is left alone."):
-            self._delete_history_entry(entry_id)
+            _del = ctk.CTkButton(row, text="Delete", width=70, font=self.font_small,
+                                 fg_color="#a13333", hover_color="#7d2626")
+            _del.configure(command=lambda b=_del, eid=entry.get("id"):
+                           self._arm_delete(b, lambda: self._delete_history_entry(eid)))
+            _del.grid(row=0, column=col + 3, rowspan=2, padx=(0, 10))
 
     def _open_or_warn(self, folder):
         if not open_folder(folder):
