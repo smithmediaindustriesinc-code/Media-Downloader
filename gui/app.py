@@ -301,6 +301,27 @@ class App(*_APP_BASES):
         self._apply_recording_state()  # 1.6.4: honour "Save to Requests / History" from the start
         self._wire_drag_and_drop()  # 1.6.1: drag a video thumbnail from a browser -> URL field
 
+        # Re-apply the launch geometry AFTER the UI is fully built and the
+        # window is realized. The call up in __init__ (line ~204) runs before
+        # _build_ui(), so Tk's geometry manager + the window manager then
+        # resize/reposition the window to fit content and it lands top-left
+        # at the wrong size. A short delay lets the WM settle first, then
+        # this puts it where it belongs (and a "Fullscreen"/maximized launch
+        # actually takes here). Runs at most twice.
+        self._geometry_finalized = 0
+        self.after(120, self._finalize_launch_geometry)
+
+    def _finalize_launch_geometry(self):
+        try:
+            self._geometry_finalized += 1
+            self.update_idletasks()
+            self._apply_launch_geometry()
+            self.lift()
+        except Exception as e:
+            log_error("finalize_launch_geometry", e)
+        if self._geometry_finalized < 2:
+            self.after(400, self._finalize_launch_geometry)
+
     RESOLUTION_PRESETS_BASE = [
         (3840, 2160), (2560, 1440), (1920, 1080), (1600, 900),
         (1366, 768), (1280, 720), (1024, 768), (800, 600), (700, 600),

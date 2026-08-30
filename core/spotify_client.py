@@ -371,8 +371,22 @@ class SpotifyClient:
                     raise SpotifyPremiumRequired(
                         "Spotify now requires a Premium account to use the API. "
                         "The account that owns this Client ID isn't Premium.")
+                if "/playlists/" in path:
+                    raise SpotifyError(
+                        "Spotify blocked access to that playlist (403).\n\n"
+                        "Spotify-made playlists - Discover Weekly, Release Radar, Daily Mix, "
+                        "and anything under \"Made For You\" - can't be read by third-party "
+                        "apps since Spotify's November 2024 API change.\n\n"
+                        "Your own playlists, playlists you follow, and public playlists made "
+                        "by other users all still work: use \"Your Spotify playlists\" or the "
+                        "search box in this window.")
                 raise SpotifyError(f"Spotify refused the request (403). {body[:200]}")
             if e.code == 404:
+                if "/playlists/" in path:
+                    raise SpotifyError(
+                        "That playlist wasn't found. If it's a Spotify-made playlist "
+                        "(Discover Weekly, Daily Mix, etc.), third-party apps can't read "
+                        "those - use \"Your Spotify playlists\" or search instead.")
                 raise SpotifyError("That Spotify item wasn't found (private, "
                                    "region-locked, or deleted).")
             raise SpotifyError(f"Spotify API error {e.code}.")
@@ -405,9 +419,13 @@ class SpotifyClient:
                 refs.append(track_obj_to_ref(t, album=alb))
             return ResolvedImport("album", alb.get("name", "album"), sid, tracks=refs)
         if kind == "playlist":
-            pl = self._get(f"/playlists/{sid}")
+            pl = self._get(f"/playlists/{sid}", {"fields":
+                "name,snapshot_id,owner(display_name,id),tracks.total"})
             refs = []
-            first = pl.get("tracks") or self._get(f"/playlists/{sid}/tracks", {"limit": 100})
+            # additional_types=track so a playlist that also holds podcast
+            # episodes doesn't 400/return null items.
+            first = self._get(f"/playlists/{sid}/tracks",
+                              {"limit": 100, "additional_types": "track"})
             for row in self._paged(first):
                 tr = (row or {}).get("track") or {}
                 if tr.get("type") == "track" or tr.get("id"):
