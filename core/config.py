@@ -156,6 +156,9 @@ DEFAULT_CONFIG = {
     "music_embed_lyrics": True,     # fetch + embed lyrics (syncedlyrics).
     "music_tag_source_comment": True,  # write a comment tag noting the audio
                             # is a YouTube match, not the original master.
+    "scroll_speed": "Medium",  # Accessibility - "Slow" | "Medium" | "Fast".
+                            # Maps to scroll_speed_ms (26 / 10 / 3) which
+                            # gui/smooth_scroll.py actually reads. #T6.
     "notify_on_download_complete": False,  # Accessibility - flash the taskbar
                             # (+ a beep) when a download / queue finishes and
                             # the window isn't in front. Issue #21.

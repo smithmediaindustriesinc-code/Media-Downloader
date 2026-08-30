@@ -3006,11 +3006,16 @@ class App(*_APP_BASES):
         title_row.grid_columnconfigure(0, weight=1)
         self.playlist_title_label = ctk.CTkLabel(title_row, text="Select a playlist", font=self.font_label)
         self.playlist_title_label.grid(row=0, column=0, sticky="w")
+        self.playlist_play_btn = ctk.CTkButton(
+            title_row, text="Play playlist", width=110, font=self.font_normal,
+            fg_color="#2fa84f", hover_color="#268a42", state="disabled",
+            command=self._play_playlist)
+        self.playlist_play_btn.grid(row=0, column=1, padx=(10, 0))
         self.playlist_open_folder_btn = ctk.CTkButton(
-            title_row, text="Open folder", width=100, font=self.font_normal,
+            title_row, text="Open location", width=110, font=self.font_normal,
             fg_color="gray40", hover_color="gray30", state="disabled",
             command=self._open_playlist_folder)
-        self.playlist_open_folder_btn.grid(row=0, column=1, padx=(10, 0))
+        self.playlist_open_folder_btn.grid(row=0, column=2, padx=(8, 0))
 
         ctk.CTkLabel(right, text="This playlist is just a folder on disk - drag files in or out with your "
                                   "regular file manager too, this list always reflects what's actually there.",
@@ -3067,7 +3072,7 @@ class App(*_APP_BASES):
         elif self.selected_playlist and self.selected_playlist not in all_playlist_names:
             self.selected_playlist = None
             self.playlist_title_label.configure(text="Select a playlist")
-            self.playlist_open_folder_btn.configure(state="disabled")
+            self.playlist_open_folder_btn.configure(state="disabled"); self.playlist_play_btn.configure(state="disabled")
             for w in self.playlist_items_frame.winfo_children():
                 w.destroy()
         self._refresh_output_playlist_dropdown()
@@ -3196,7 +3201,7 @@ class App(*_APP_BASES):
     def _select_playlist(self, name):
         self.selected_playlist = name
         self.playlist_title_label.configure(text=name)
-        self.playlist_open_folder_btn.configure(state="normal")
+        self.playlist_open_folder_btn.configure(state="normal"); self.playlist_play_btn.configure(state="normal")
         for w in self.playlist_items_frame.winfo_children():
             w.destroy()
         root = self.cfg.get("playlists_path", "")
@@ -3233,6 +3238,42 @@ class App(*_APP_BASES):
         folder = self._playlist_folder(self.selected_playlist)
         if not folder or not open_folder(folder):
             messagebox.showwarning("Not found", "That playlist's folder couldn't be opened.")
+
+    def _play_playlist(self):
+        """Queue every media file in the playlist folder into the chosen
+        media player and start playing (#P1). Uses media_player_path;
+        VLC gets its files as one enqueue so it plays through them."""
+        if not self.selected_playlist:
+            return
+        folder = self._playlist_folder(self.selected_playlist)
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning("Not found", "That playlist folder couldn't be found.")
+            return
+        exts = (".mp3", ".m4a", ".opus", ".flac", ".wav", ".ogg", ".aac",
+                ".mp4", ".mkv", ".webm", ".mov", ".avi")
+        files = sorted(os.path.join(folder, f) for f in os.listdir(folder)
+                       if f.lower().endswith(exts))
+        if not files:
+            messagebox.showinfo("Play playlist", "This playlist has no media files yet.")
+            return
+        player = (self.cfg.get("media_player_path", "") or "").strip()
+        try:
+            if player and os.path.isfile(player):
+                args = [player]
+                if "vlc" in os.path.basename(player).lower():
+                    args += ["--no-one-instance", "--playlist-enqueue"]
+                subprocess.Popen(args + files)
+            else:
+                # no dedicated player set - hand the folder to the OS
+                # (opens the first file's default app; user can use its own
+                # "play folder" from there) and tell them.
+                open_file(files[0])
+                self._log("No media player set (Settings -> Advanced) - opened the first "
+                          "track with the system default. Set a player like VLC to play "
+                          "the whole playlist.")
+        except Exception as e:
+            log_error("play_playlist", e)
+            messagebox.showwarning("Play playlist", f"Couldn't start playback: {e}")
 
     def _remove_from_playlist(self, filename):
         remove_file_from_playlist(self.cfg.get("playlists_path", ""), self.selected_playlist, filename)
@@ -4198,19 +4239,15 @@ class App(*_APP_BASES):
         scroll_speed_header_row = ctk.CTkFrame(scroll, fg_color="transparent")
         scroll_speed_header_row.pack(anchor="w", fill="x")
         self._sub_header(scroll_speed_header_row, "Scroll Speed", pack_side="left")
-        self._add_hint_icon(scroll_speed_header_row, "How quickly the smooth-scroll animation moves - lower "
-                             "is faster, higher is slower and more gradual. Applies everywhere in the app "
-                             "immediately.").pack(side="left", padx=(4, 0), pady=(14, 6))
+        self._add_hint_icon(scroll_speed_header_row, "How fast the smooth-scroll animation glides. "
+                             "Applies everywhere in the app immediately.").pack(
+            side="left", padx=(4, 0), pady=(14, 6))
         scroll_speed_row = ctk.CTkFrame(scroll, fg_color="transparent")
         scroll_speed_row.pack(fill="x", padx=5, pady=(0, 15))
-        self.scroll_speed_var = ctk.IntVar(value=self.cfg.get("scroll_speed_ms", 8))
-        scroll_speed_slider = ctk.CTkSlider(scroll_speed_row, from_=2, to=40, number_of_steps=38,
-                                             width=self._slider_width(), variable=self.scroll_speed_var,
-                                             command=self._on_scroll_speed_changed)
-        scroll_speed_slider.pack(side="left", padx=(0, 10))
-        self.scroll_speed_label = ctk.CTkLabel(scroll_speed_row, text=f"{self.scroll_speed_var.get()}ms",
-                                                font=self.font_small, width=45)
-        self.scroll_speed_label.pack(side="left")
+        self.scroll_speed_var = ctk.StringVar(value=self._scroll_speed_name())
+        ctk.CTkSegmentedButton(scroll_speed_row, values=["Slow", "Medium", "Fast"],
+                               variable=self.scroll_speed_var,
+                               command=self._on_scroll_speed_changed).pack(side="left")
 
         ctk.CTkButton(scroll, text="Save Settings", font=self.font_label, height=40,
                       command=self._save_settings).pack(fill="x", padx=5, pady=(15, 6))
@@ -5727,12 +5764,19 @@ class App(*_APP_BASES):
         self.cfg["batch_prefetch_sizes"] = self.batch_prefetch_sizes_var.get()
         save_config(self.cfg)
 
+    SCROLL_SPEED_MS = {"Slow": 26, "Medium": 10, "Fast": 3}
+
+    def _scroll_speed_name(self):
+        ms = self.cfg.get("scroll_speed_ms", 10)
+        # nearest named preset to whatever ms is stored
+        return min(self.SCROLL_SPEED_MS, key=lambda k: abs(self.SCROLL_SPEED_MS[k] - ms))
+
     def _on_scroll_speed_changed(self, value):
-        ms = int(value)
+        ms = self.SCROLL_SPEED_MS.get(value, 10)
+        self.cfg["scroll_speed"] = value
         self.cfg["scroll_speed_ms"] = ms
-        self.scroll_speed_label.configure(text=f"{ms}ms")
         from gui.smooth_scroll import set_scroll_speed
-        set_scroll_speed(ms)  # applied live, everywhere, immediately - see smooth_scroll.py's module-level design
+        set_scroll_speed(ms)  # live, everywhere - see smooth_scroll.py's module-level design
         save_config(self.cfg)
 
     def _get_loading_delay_setting(self):
