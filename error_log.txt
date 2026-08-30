@@ -1,0 +1,4 @@
+----- 2026-08-30T15:29:36.386840  [selftest] -----
+hello
+ValueError: x
+

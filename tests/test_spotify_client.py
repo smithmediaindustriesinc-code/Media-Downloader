@@ -8,7 +8,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.spotify_client import (parse_spotify_ref, track_obj_to_ref, SpotifyClient,
-                                 SpotifyError, _pkce_pair, _MemoryStore)
+                                 SpotifyError, _pkce_pair, _MemoryStore,
+                                 is_spotify_search_query)
 
 fails = []
 
@@ -88,6 +89,102 @@ check("redirect uri", cl.redirect_uri == "http://127.0.0.1:9999/callback")
 check("not connected initially", cl.is_connected is False)
 cl._token_store.set("fake_refresh")
 check("connected after token set", cl.is_connected is True)
+
+
+# --- search + is_spotify_search_query ---------------------------------- #
+# Test search with a canned response including None entries in playlists
+def fake_get_search(path, params):
+    """Return a canned /search response with a None entry in playlists."""
+    return {
+        "tracks": {
+            "items": [
+                {
+                    "name": "One More Time",
+                    "id": "track1",
+                    "artists": [{"name": "Daft Punk"}],
+                    "album": {"name": "Discovery", "total_tracks": 14,
+                              "artists": [{"name": "Daft Punk"}], "images": []},
+                    "track_number": 1,
+                    "disc_number": 1,
+                    "duration_ms": 320000,
+                    "explicit": False,
+                    "external_ids": {"isrc": ""}
+                }
+            ]
+        },
+        "playlists": {
+            "items": [
+                {
+                    "id": "pl1",
+                    "name": "Daft Punk Best",
+                    "owner": {"display_name": "spotify"},
+                    "tracks": {"total": 25}
+                },
+                None,  # Spotify can return null entries in search results
+                {
+                    "id": "pl2",
+                    "name": "Electronic Vibes",
+                    "owner": {"display_name": "user123"},
+                    "tracks": {"total": 50}
+                }
+            ]
+        },
+        "albums": {
+            "items": [
+                {
+                    "id": "alb1",
+                    "name": "Discovery",
+                    "artists": [{"name": "Daft Punk"}],
+                    "total_tracks": 14
+                }
+            ]
+        },
+        "artists": {
+            "items": [
+                {
+                    "id": "art1",
+                    "name": "Daft Punk"
+                }
+            ]
+        }
+    }
+
+# Monkeypatch the search
+cl_search = SpotifyClient("test_id", token_store=_MemoryStore())
+cl_search._token_store.set("fake_token")
+cl_search._access_token = "fake_token"
+cl_search._access_expires = float('inf')
+original_get = cl_search._get
+cl_search._get = fake_get_search
+
+result = cl_search.search("daft punk", kinds=("track", "playlist", "album", "artist"), limit=20)
+
+check("search tracks returned", len(result["tracks"]) == 1)
+check("search track title", result["tracks"][0].title == "One More Time")
+check("search playlists skips None", len(result["playlists"]) == 2)
+check("search playlist 1 name", result["playlists"][0]["name"] == "Daft Punk Best")
+check("search playlist 2 name", result["playlists"][1]["name"] == "Electronic Vibes")
+check("search albums returned", len(result["albums"]) == 1)
+check("search album artist", result["albums"][0]["artist"] == "Daft Punk")
+check("search artists returned", len(result["artists"]) == 1)
+
+# Test search with empty query
+result_empty = cl_search.search("", kinds=("track", "playlist"))
+check("search empty query returns empty dict keys", set(result_empty.keys()) == {"track", "playlist"})
+check("search empty query returns empty lists", all(len(v) == 0 for v in result_empty.values()))
+
+# Test search with only requested kinds
+result_subset = cl_search.search("daft", kinds=("track", "artist"), limit=20)
+check("search subset has only requested keys", set(result_subset.keys()) == {"tracks", "artists"})
+
+# Test is_spotify_search_query
+check("is_spotify_search_query plain text True", is_spotify_search_query("daft punk one more time") is True)
+check("is_spotify_search_query Spotify URL False", is_spotify_search_query("https://open.spotify.com/track/abc123") is False)
+check("is_spotify_search_query spotify URI False", is_spotify_search_query("spotify:track:abc123") is False)
+check("is_spotify_search_query other URL False", is_spotify_search_query("https://youtube.com/watch?v=x") is False)
+check("is_spotify_search_query empty string False", is_spotify_search_query("") is False)
+check("is_spotify_search_query whitespace False", is_spotify_search_query("   ") is False)
+check("is_spotify_search_query liked False", is_spotify_search_query("liked") is False)
 
 print()
 if fails:

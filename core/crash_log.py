@@ -17,6 +17,11 @@ def log_error(text):
     still wants them recorded (e.g. the recurring-task scheduler, which
     must never let one bad tick kill a loop, but still wants a record)."""
     _write(text)
+    try:
+        from core.error_log import log_error as _central
+        _central("crash_log", exc=None, extra=text)
+    except Exception:
+        pass
 
 
 def _write(text):
@@ -58,6 +63,11 @@ def install_tk_report_callback(app):
     def report(exc_type, exc_value, exc_tb):
         text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         _write(text)
+        try:
+            from core.error_log import log_error as _central
+            _central("tk-callback", exc_value)
+        except Exception:
+            pass
         try:
             import tkinter.messagebox as mb
             mb.showerror(

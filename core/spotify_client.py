@@ -116,6 +116,20 @@ def parse_spotify_ref(text):
     raise SpotifyError("That doesn't look like a Spotify link.")
 
 
+def is_spotify_search_query(text):
+    """A plain search phrase is anything that ISN'T a Spotify ref and isn't a
+    URL. Used so the search box only sends deliberate queries."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    try:
+        parse_spotify_ref(t)
+        return False   # it's a real Spotify ref, not a search
+    except SpotifyError:
+        pass
+    return "://" not in t   # not some other URL
+
+
 # --------------------------------------------------------------------------- #
 # response -> TrackRef
 # --------------------------------------------------------------------------- #
@@ -441,6 +455,70 @@ class SpotifyClient:
         """Just the current snapshot_id - cheap check for re-sync."""
         return self._get(f"/playlists/{playlist_id}",
                          {"fields": "snapshot_id"}).get("snapshot_id", "")
+
+    def search(self, query, kinds=("track", "playlist"), limit=20):
+        """Search Spotify. `kinds` is any of "track","playlist","album","artist".
+        Returns a dict: {"tracks": [TrackRef, ...],
+                         "playlists": [{"id","name","owner","tracks_total"}, ...],
+                         "albums": [{"id","name","artist","tracks_total"}, ...],
+                         "artists": [{"id","name"}, ...]}
+        Only the requested kinds are populated. Raises the usual SpotifyError
+        subclasses (SpotifyAuthError / SpotifyPremiumRequired / SpotifyRateLimited)."""
+        q = query.strip()
+        if not q:
+            return {k: [] for k in kinds if k in ("track", "playlist", "album", "artist")}
+
+        type_param = ",".join(k for k in kinds if k in ("track", "playlist", "album", "artist"))
+        resp = self._get("/search", {"q": q, "type": type_param, "limit": max(1, min(50, limit))})
+
+        result = {}
+
+        if "track" in kinds:
+            result["tracks"] = [
+                track_obj_to_ref(t) for t in (resp.get("tracks") or {}).get("items", []) if t
+            ]
+            result["tracks"] = [t for t in result["tracks"] if t and t.title]
+
+        if "playlist" in kinds:
+            playlists = []
+            for p in (resp.get("playlists") or {}).get("items", []):
+                if p is None:
+                    continue
+                playlists.append({
+                    "id": p.get("id", ""),
+                    "name": p.get("name", "(untitled)"),
+                    "owner": (p.get("owner") or {}).get("display_name", ""),
+                    "tracks_total": (p.get("tracks") or {}).get("total"),
+                })
+            result["playlists"] = playlists
+
+        if "album" in kinds:
+            albums = []
+            for a in (resp.get("albums") or {}).get("items", []):
+                if a is None:
+                    continue
+                artists = a.get("artists") or []
+                artist_name = artists[0].get("name", "") if artists else ""
+                albums.append({
+                    "id": a.get("id", ""),
+                    "name": a.get("name", ""),
+                    "artist": artist_name,
+                    "tracks_total": a.get("total_tracks"),
+                })
+            result["albums"] = albums
+
+        if "artist" in kinds:
+            artists = []
+            for art in (resp.get("artists") or {}).get("items", []):
+                if art is None:
+                    continue
+                artists.append({
+                    "id": art.get("id", ""),
+                    "name": art.get("name", ""),
+                })
+            result["artists"] = artists
+
+        return result
 
 
 # --------------------------------------------------------------------------- #

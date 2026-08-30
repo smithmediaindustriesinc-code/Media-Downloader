@@ -31,6 +31,7 @@ from core.downloader import (Downloader, DownloadCancelled, DownloadStageError, 
                               VIDEO_QUALITIES, VIDEO_FORMATS, AUDIO_FORMATS, AUDIO_QUALITIES,
                               ASPECT_RATIO_OPTIONS)
 from core.error_popup import show_error
+from core.error_log import log_error
 from core.download_requests import (start_request, update_item, finish_request, add_item_to_request,
                                      reopen_for_retry, get_all_requests, get_request, delete_request,
                                      find_previous_download, set_recording as _set_requests_recording)
@@ -222,8 +223,8 @@ class App(*_APP_BASES):
         if self.cfg.get("background_color"):
             try:
                 self.configure(fg_color=self.cfg["background_color"])
-            except Exception:
-                pass  # an invalid/stale saved color should never block startup
+            except Exception as e:
+                log_error("set_background_color", e)
         mark("background color applied")
 
         try:
@@ -343,13 +344,13 @@ class App(*_APP_BASES):
             try:
                 self.state("zoomed")
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                log_error("window_state_zoomed", e)
             try:
                 self.attributes("-zoomed", True)  # some Linux window managers' equivalent
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                log_error("window_attributes_zoomed", e)
             # Last-resort fallback if neither maximize approach is
             # supported on this platform at all - at least fill the
             # screen rather than doing nothing.
@@ -376,13 +377,13 @@ class App(*_APP_BASES):
             try:
                 self.state("zoomed")
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                log_error("restore_window_state_zoomed", e)
             try:
                 self.attributes("-zoomed", True)
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                log_error("restore_window_attributes_zoomed", e)
         width = self.cfg.get("window_width", 820)
         height = self.cfg.get("window_height", 720)
         self._center_window(width, height)
@@ -1260,8 +1261,8 @@ class App(*_APP_BASES):
                 try:
                     self.tabview.set("Download")
                     self.inner_tabview.set("Single Download")
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_error("set_tabs_for_dnd", e)
                 self.url_entry.delete(0, "end")
                 self.url_entry.insert(0, url)
                 bulk = bool(self._DND_BULK_URL_RE.search(url))
@@ -1438,8 +1439,8 @@ class App(*_APP_BASES):
             return
         try:
             self.thumbnail_label.configure(image=None, text="")
-        except Exception:
-            pass  # already gone - nothing more to do
+        except Exception as e:
+            log_error("clear_thumbnail", e)
         self.thumbnail_image = None
 
     def clear_log(self):
@@ -1566,8 +1567,8 @@ class App(*_APP_BASES):
             img = Image.open(io.BytesIO(data))
             img.thumbnail((160, 90))
             self.after(0, lambda: self._show_thumbnail(img))
-        except Exception:
-            pass
+        except Exception as e:
+            log_error("load_thumbnail", e)
 
     def _show_thumbnail(self, img):
         new_image = ctk.CTkImage(img, size=img.size)
