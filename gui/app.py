@@ -741,12 +741,12 @@ class App(*_APP_BASES):
                                               variable=self.subtitles_var)
         self.subtitles_check.grid(row=0, column=3, sticky="e", padx=15, pady=(12, 4))
 
-        ctk.CTkLabel(shared, text="Aspect ratio", font=self.font_label).grid(
-            row=1, column=0, sticky="w", padx=15, pady=(4, 4))
+        # Aspect ratio is a Settings-tab option only now (issue #16) - it was
+        # duplicated here. "Any" (the default) means download the source's
+        # native aspect; a forced ratio only kicks in when Settings says so.
+        # self.aspect_var stays as a plain holder synced from config so the
+        # download paths can keep reading self.aspect_var.get().
         self.aspect_var = ctk.StringVar(value=self.cfg.get("aspect_ratio", "Any"))
-        self.aspect_dropdown = ScrollableDropdown(shared, ASPECT_RATIO_OPTIONS, self.aspect_var,
-                                                    font=self.font_normal, width=220)
-        self.aspect_dropdown.grid(row=1, column=1, sticky="w", padx=15, pady=(4, 4))
 
         # When off, this download is not written to Request History or the
         # History tab (core.download_requests / core.history recording is
@@ -799,7 +799,8 @@ class App(*_APP_BASES):
         ctk.CTkLabel(spotify_row, text="  (or just paste a Spotify link in the box below)",
                      font=self.font_small, text_color="gray55").pack(side="left")
 
-        self.inner_tabview = ctk.CTkTabview(outer, height=260)
+        self.inner_tabview = ctk.CTkTabview(outer, height=260,
+                                            command=self._on_download_mode_change)
         self.inner_tabview.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
         single_tab = self.inner_tabview.add("Single Download")
         batch_tab = self.inner_tabview.add("Batch Queue")
@@ -986,12 +987,10 @@ class App(*_APP_BASES):
         self.batch_add_entry.bind("<Return>", lambda e: self._add_batch_urls_from_entry())
         ctk.CTkButton(add_row, text="Add", width=70, font=self.font_normal,
                       command=self._add_batch_urls_from_entry).grid(row=0, column=1)
-        # Live count of what's queued up, before Start Queue is pressed -
-        # updates as URLs are added (one at a time, pasted in bulk, or
-        # dropped in), removed, undone, or cleared. See _refresh_batch_dynamic_list.
-        self.batch_queue_size_label = ctk.CTkLabel(add_row, text="empty", font=self.font_small,
-                                                    text_color="gray60", width=70, anchor="e")
-        self.batch_queue_size_label.grid(row=0, column=2, padx=(8, 0))
+        # The live queue count lives ON the Start button now ("Start N
+        # downloads") rather than a separate label - issue #22. Kept as a
+        # hidden holder so nothing that references it breaks.
+        self.batch_queue_size_label = ctk.CTkLabel(add_row, text="")
 
         undo_row = ctk.CTkFrame(self._batch_dynamic_frame, fg_color="transparent")
         undo_row.grid(row=1, column=0, sticky="w", pady=(0, 6))
@@ -1020,7 +1019,9 @@ class App(*_APP_BASES):
         self.batch_clear_btn.pack(side="left", padx=(10, 0))
         self.batch_status_label = ctk.CTkLabel(tab, text="", font=self.font_small, anchor="w")
         self.batch_status_label.grid(row=4, column=0, sticky="w", padx=5, pady=(0, 4))
+        self.batch_box.bind("<KeyRelease>", self._update_batch_start_btn)
         self._apply_batch_queue_mode()
+        self._update_batch_start_btn()
         # Ctrl+Z only acts on the batch URL list, and only while dynamic
         # mode is actually on - bound at the toplevel level (not just
         # this one entry) since the whole point is undoing a removal
@@ -1050,6 +1051,7 @@ class App(*_APP_BASES):
             self.batch_box.grid()
             if hasattr(self, "batch_clear_btn"):
                 self.batch_clear_btn.configure(text="Clear", width=90)
+        self._update_batch_start_btn()
 
     def _on_dynamic_batch_queue_changed(self):
         self.cfg["dynamic_batch_queue_enabled"] = self.dynamic_batch_queue_var.get()
@@ -1129,10 +1131,28 @@ class App(*_APP_BASES):
         self.batch_undo_btn.configure(state="normal" if self._batch_undo_stack else "disabled")
         self.batch_undo_count_label.configure(
             text=f"{len(self._batch_undo_stack)} removed" if self._batch_undo_stack else "")
-        if hasattr(self, "batch_queue_size_label"):
-            n = len(self._batch_urls)
-            self.batch_queue_size_label.configure(
-                text="empty" if n == 0 else ("1 URL" if n == 1 else f"{n} URLs"))
+        self._update_batch_start_btn()
+
+    def _batch_queued_count(self):
+        """How many URLs are queued right now, in whichever batch mode is on."""
+        if self.cfg.get("dynamic_batch_queue_enabled", False):
+            return len(getattr(self, "_batch_urls", []))
+        try:
+            return len([x for x in self.batch_box.get("1.0", "end").splitlines() if x.strip()])
+        except Exception:
+            return 0
+
+    def _update_batch_start_btn(self, *_):
+        """Issue #22 - the queued-URL count lives on the Start button."""
+        if not hasattr(self, "batch_btn"):
+            return
+        n = self._batch_queued_count()
+        if n == 0:
+            self.batch_btn.configure(text="Start Queue")
+        elif n == 1:
+            self.batch_btn.configure(text="Start 1 download")
+        else:
+            self.batch_btn.configure(text=f"Start {n} downloads")
 
     # ------------------------------------------------------------------
     # 1.6.1 - drag a video thumbnail from a browser onto the window
@@ -2419,6 +2439,36 @@ class App(*_APP_BASES):
     def _open_spotify_dialog(self):
         from gui.music_import import open_spotify_dialog
         open_spotify_dialog(self)
+
+    def _on_download_mode_change(self):
+        """Carry the URL across when the user switches Single <-> Batch
+        (issue #17). Only moves the FIRST URL, and only into an empty target."""
+        try:
+            mode = self.inner_tabview.get()
+        except Exception:
+            return
+        if mode == "Batch Queue":
+            url = self.url_entry.get().strip()
+            if not url:
+                return
+            if self.cfg.get("dynamic_batch_queue_enabled", False):
+                if not self._batch_urls:
+                    self._batch_urls = [url]
+                    self._batch_undo_stack = []
+                    self._refresh_batch_dynamic_list()
+            elif not self.batch_box.get("1.0", "end").strip():
+                self.batch_box.insert("1.0", url)
+        elif mode == "Single Download":
+            if self.url_entry.get().strip():
+                return
+            first = ""
+            if self.cfg.get("dynamic_batch_queue_enabled", False):
+                first = self._batch_urls[0] if self._batch_urls else ""
+            else:
+                lines = [x.strip() for x in self.batch_box.get("1.0", "end").splitlines() if x.strip()]
+                first = lines[0] if lines else ""
+            if first:
+                self.url_entry.insert(0, first)
 
     def _start_music_import_download(self, session, picked, urls, tag_map,
                                      existing_import_id=None):
@@ -4146,8 +4196,11 @@ class App(*_APP_BASES):
         top.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         top.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(top, text="Dependencies", font=self.font_label).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(top, text="Refresh", width=90, font=self.font_normal,
+                      fg_color="gray40", hover_color="gray30",
+                      command=self._refresh_version_tab).grid(row=0, column=1, sticky="e", padx=(0, 8))
         ctk.CTkButton(top, text="Update All", font=self.font_normal,
-                      command=self._update_all_clicked).grid(row=0, column=1, sticky="e")
+                      command=self._update_all_clicked).grid(row=0, column=2, sticky="e")
 
         self.version_status_frame = ctk.CTkScrollableFrame(tab)
         self.version_status_frame.grid(row=2, column=0, sticky="nsew")
@@ -4674,6 +4727,8 @@ class App(*_APP_BASES):
             pass
 
     def _autosave_tick(self):
+        if getattr(self, "_closing", False):
+            return  # the close handler already did the final save; don't race it
         try:
             self._snapshot_window_geometry()
             # Only write config.json when something actually changed since the

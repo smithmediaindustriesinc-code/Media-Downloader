@@ -76,6 +76,13 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir=installer_output
 OutputBaseFilename={#OutBase}
+; Close a running Media Downloader before an update/repair so its files
+; unlock cleanly (also matters for the in-app "update this copy" flow).
+; The uninstaller additionally taskkills it (see below) so nothing rewrites
+; config.json AFTER the data folder has been removed - GitHub issue #2.
+CloseApplications=yes
+CloseApplicationsFilter=MediaDownloader.exe
+RestartApplications=no
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -165,6 +172,12 @@ var
 begin
   if CurUninstallStep = usPostUninstall then
   begin
+    // Make sure no Media Downloader process is still alive: otherwise a
+    // close handler / autosave / background daemon can rewrite config.json
+    // with defaults right after we delete the folder below (issue #2).
+    Exec('taskkill.exe', '/F /IM {#MyAppExeName} /T', '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode);
+    Sleep(600);
     AppDataPath := ExpandConstant('{userappdata}\{#AppDataName}');
     if DirExists(AppDataPath) then
     begin
