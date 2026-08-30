@@ -11,18 +11,43 @@
 ; Everything the app needs (assets, DISCLAIMER, update scripts) is packaged
 ; into this single installer. Everything it creates at runtime (config.json,
 ; history.json, playlists.json, ffmpeg\) is written to the current user's
-; %APPDATA%\Media Downloader folder, NOT next to the installed .exe - the
+; %APPDATA%\Media Downloader folder (or "%APPDATA%\Media Downloader Beta"
+; for a /DBETA build), NOT next to the installed .exe - the
 ; default install location (Program Files) is read-only to normal users,
 ; so writing there would fail with a permissions error.
 
-#define MyAppName "Media Downloader"
-#define MyAppVersion "1.6.10"
+; --- normal build vs "beta instance" build --------------------------------
+; Compile normally:            ISCC installer.iss
+;   -> "Media Downloader", installs to {autopf}\Media Downloader, AppData
+;      %APPDATA%\Media Downloader, output MediaDownloaderSetup.exe
+; Compile the beta instance:   ISCC /DBETA installer.iss
+;   -> "Media Downloader Beta", its OWN AppId / install folder / Start-menu
+;      group / %APPDATA%\Media Downloader Beta / uninstall entry, and it
+;      drops an "instance.flag" file (contents: beta) next to the .exe that
+;      core/paths.py reads to pick the "Media Downloader Beta" AppData dir.
+;      Output MediaDownloaderSetup-beta.exe. Used by the in-app updater's
+;      "install the beta as a separate copy" option so a beta can be run
+;      side-by-side with the stable install without either touching the
+;      other's settings/history.
+#ifndef BETA
+  #define MyAppName "Media Downloader"
+  #define MyAppId "{{B6E1B5C4-8B1B-4A3E-9C2A-MEDIADOWNLOADER}}"
+  #define AppDataName "Media Downloader"
+  #define OutBase "MediaDownloaderSetup"
+#else
+  #define MyAppName "Media Downloader Beta"
+  #define MyAppId "{{B6E1B5C4-8B1B-4A3E-9C2A-MEDIADOWNLOADRBETA}}"
+  #define AppDataName "Media Downloader Beta"
+  #define OutBase "MediaDownloaderSetup-beta"
+#endif
+
+#define MyAppVersion "1.7.0"
 #define MyAppPublisher "Smith Media Industries inc."
 #define MyAppExeName "MediaDownloader.exe"
 #define MyDistFolder "MediaDownloader"
 
 [Setup]
-AppId={{B6E1B5C4-8B1B-4A3E-9C2A-MEDIADOWNLOADER}}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
@@ -41,7 +66,7 @@ VersionInfoCopyright=Copyright (C) 2026 {#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir=installer_output
-OutputBaseFilename=MediaDownloaderSetup
+OutputBaseFilename={#OutBase}
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -131,18 +156,18 @@ var
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    AppDataPath := ExpandConstant('{userappdata}\Media Downloader');
+    AppDataPath := ExpandConstant('{userappdata}\{#AppDataName}');
     if DirExists(AppDataPath) then
     begin
-      if MsgBox('Media Downloader also stored settings, history, and playlists in your '
+      if MsgBox('{#MyAppName} also stored settings, history, and playlists in your '
         + 'AppData folder, separately from the program files.' + #13#10 + #13#10
         + 'Would you like to save a copy of that data somewhere before it''s permanently '
         + 'deleted?', mbConfirmation, MB_YESNO) = IDYES then
       begin
         BackupRoot := '';
-        if BrowseForFolder('Choose a folder to save your Media Downloader data to:', BackupRoot, False) then
+        if BrowseForFolder('Choose a folder to save your {#MyAppName} data to:', BackupRoot, False) then
         begin
-          BackupTarget := BackupRoot + '\Media Downloader Backup';
+          BackupTarget := BackupRoot + '\{#MyAppName} Backup';
           if not DirExists(BackupTarget) then
             CreateDir(BackupTarget);
           Exec('cmd.exe', '/c xcopy "' + AppDataPath + '" "' + BackupTarget + '\" /E /I /Y /Q',
@@ -170,7 +195,14 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
-    AppDataPath := ExpandConstant('{userappdata}\Media Downloader');
+#ifdef BETA
+    // Mark this as the "beta instance" so core/paths.py routes its
+    // writable data to %APPDATA%\Media Downloader Beta and titles the
+    // window accordingly - lets a beta run beside the stable install
+    // without either one touching the other's settings/history.
+    SaveStringToFile(ExpandConstant('{app}\instance.flag'), 'beta', False);
+#endif
+    AppDataPath := ExpandConstant('{userappdata}\{#AppDataName}');
     if not DirExists(AppDataPath) then  // genuinely fresh - no existing settings to protect
     begin
       if MsgBox('Would you like to import settings from a previous export (a .json file saved '

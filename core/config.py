@@ -132,6 +132,30 @@ DEFAULT_CONFIG = {
                             # update check also offers preview/beta builds,
                             # not just the latest stable release. Off by
                             # default. Added 1.6.10.
+
+    # --- "Import from Spotify" (1.7.0). The audio is always a YouTube
+    #     match, never the Spotify file - see core/music_import.py. ---
+    "spotify_client_id": "",        # user's own Spotify app Client ID
+                            # (developer.spotify.com/dashboard). No secret is
+                            # ever stored; auth is PKCE. The account needs
+                            # Spotify Premium (2026 API rule).
+    "spotify_redirect_port": 8888,  # loopback port for the PKCE sign-in
+                            # callback; must match the redirect URI added in
+                            # the Spotify app settings
+                            # (http://127.0.0.1:<port>/callback).
+    "music_match_min_confidence": 0.55,   # below this a matched track is
+                            # flagged for the user to review, not auto-queued.
+    "music_match_duration_tolerance_s": 4,  # a YouTube result within this
+                            # many seconds of the Spotify duration counts as
+                            # an exact-length match.
+    "music_auto_download_confident": True,  # queue confident matches without
+                            # waiting for the user to tick each one (the user
+                            # asked for this). Ambiguous / no-match rows still
+                            # wait.
+    "music_embed_cover": True,      # embed the Spotify album art in the file.
+    "music_embed_lyrics": True,     # fetch + embed lyrics (syncedlyrics).
+    "music_tag_source_comment": True,  # write a comment tag noting the audio
+                            # is a YouTube match, not the original master.
 }
 
 

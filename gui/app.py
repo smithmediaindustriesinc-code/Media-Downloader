@@ -42,7 +42,8 @@ from core.history import (load_history, add_entry, update_entry, clear_history, 
 from core.playlists import (list_playlists, create_playlist, delete_playlist, playlist_path,
                              playlist_contents, add_file_to_playlist, remove_file_from_playlist,
                              ensure_playlists_root, import_folder_as_playlist)
-from core.paths import resource_path, ensure_media_folders, ensure_playlists_folder, app_dir, install_dir
+from core.paths import (resource_path, ensure_media_folders, ensure_playlists_folder, app_dir,
+                        install_dir, instance_name)
 from core import dependencies as deps
 from gui.scrollable_dropdown import ScrollableDropdown
 from gui.dialogs import MoveFilesDialog, NewPlaylistDialog
@@ -191,7 +192,7 @@ class App(*_APP_BASES):
         apply_color_theme(self.cfg["color_theme"])
         mark("appearance mode + color theme set")
 
-        self.title("Media Downloader")
+        self.title(instance_name())
         self._apply_launch_geometry()
         self.minsize(700, 600)
         self.resizable(True, True)
@@ -590,7 +591,7 @@ class App(*_APP_BASES):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=20, pady=(15, 5))
         header.grid_columnconfigure(0, weight=1)
-        title_label = ctk.CTkLabel(header, text="Media Downloader", font=self.font_title)
+        title_label = ctk.CTkLabel(header, text=instance_name(), font=self.font_title)
         title_label.grid(row=0, column=0, sticky="w")
 
         # Mini progress bar, shown only on tabs OTHER than Download (where
@@ -668,6 +669,7 @@ class App(*_APP_BASES):
         # below, since Version needs to stay last).
         tab_download = self.tabview.add("Download")
         tab_media = self.tabview.add("Media")
+        tab_import = self.tabview.add("Import")
         tab_history = self.tabview.add("History")
         tab_settings = self.tabview.add("Settings")
         tab_more = self.tabview.add("More")
@@ -675,6 +677,8 @@ class App(*_APP_BASES):
 
         self._build_download_tab(tab_download)
         self._build_media_tab(tab_media)
+        from gui.music_import import build_import_tab
+        build_import_tab(self, tab_import)
         self._build_history_tab(tab_history)
         self._build_settings_tab(tab_settings)
         self._build_more_tab(tab_more)
@@ -696,6 +700,7 @@ class App(*_APP_BASES):
         # actually exists (it's added dynamically, well after this runs).
         self._apply_tab_icon("Download")
         self._apply_tab_icon("Media")
+        self._apply_tab_icon("Import")
         self._apply_tab_icon("History")
         self._apply_tab_icon("Settings")
         self._apply_tab_icon("More")
@@ -2391,6 +2396,82 @@ class App(*_APP_BASES):
                                   "ETAs will use the item-count estimate.", color="blue")
 
     # ------------------------------------------------------------------ #
+    def _start_music_import_download(self, session, picked, urls, tag_map,
+                                     existing_import_id=None):
+        """Hand a resolved Spotify/pasted import to the normal batch queue.
+        `tag_map` is {youtube_url: TrackRef} - _maybe_tag_music_track() writes
+        the real metadata onto each file as it finishes."""
+        if self.batch_running:
+            messagebox.showinfo("Import", "A download is already running - wait for it "
+                                "to finish, then start the import.")
+            return
+        self._music_tag_map = dict(tag_map)
+
+        out_dir = self._resolve_output_dir() or ""
+        try:
+            from core import music_import
+            rec = music_import.record_from_session(session, out_dir, [])
+            if existing_import_id:
+                rec["id"] = existing_import_id
+            music_import.save_import(rec)
+            self._music_import_record_id = rec["id"]
+        except Exception:
+            self._music_import_record_id = None
+
+        # Fill the queue (dynamic list or the plain textbox) + name it.
+        if self.cfg.get("dynamic_batch_queue_enabled", False):
+            self._batch_urls = list(urls)
+            self._batch_undo_stack = []
+            self._refresh_batch_dynamic_list()
+        else:
+            self.batch_box.delete("1.0", "end")
+            self.batch_box.insert("1.0", "\n".join(urls))
+        try:
+            self.queue_name_entry.delete(0, "end")
+            self.queue_name_entry.insert(0, (session.name or "Spotify import")[:60])
+        except Exception:
+            pass
+
+        self.tabview.set("Download")
+        try:
+            self.inner_tabview.set("Batch Queue")
+        except Exception:
+            pass
+        self._log(f"Music import: queued {len(urls)} track(s) from \"{session.name}\". "
+                  f"Audio is a YouTube match - tags come from the source metadata.")
+        self.start_batch_download()
+
+    def _maybe_tag_music_track(self, url, path):
+        """Post-download hook: if `url` came from a music import, write the
+        TrackRef's tags (+ cover + lyrics) onto the downloaded file and record
+        the file path in music_imports.json. Never disrupts the batch."""
+        ref = getattr(self, "_music_tag_map", {}).get(url)
+        if not ref or not path:
+            return
+        try:
+            from core import tagging, music_import
+            lyrics = None
+            if self.cfg.get("music_embed_lyrics", True):
+                lyrics = tagging.fetch_lyrics(ref)
+            ok, msg = tagging.write_tags(
+                path, ref,
+                embed_cover=self.cfg.get("music_embed_cover", True),
+                source_comment=self.cfg.get("music_tag_source_comment", True),
+                lyrics=lyrics)
+            self._threadsafe_log(("Tagged: " if ok else "Tagging skipped: ") + msg,
+                                 color=None if ok else "red")
+            rid = getattr(self, "_music_import_record_id", None)
+            if rid:
+                rec = music_import.get_import(rid)
+                if rec:
+                    for trow in rec.get("tracks", []):
+                        if trow.get("yt_url") == url and not trow.get("file"):
+                            trow["file"] = path
+                            break
+                    music_import.save_import(rec)
+        except Exception as e:
+            self._threadsafe_log(f"Could not tag {path}: {e}", color="red")
+
     def start_batch_download(self):
         if self.cfg.get("dynamic_batch_queue_enabled", False):
             urls = list(self._batch_urls)
@@ -2531,6 +2612,7 @@ class App(*_APP_BASES):
                     self._threadsafe_log(f"Saved: {path}")
                     update_item(request_id, url, status="success", path=path,
                                 elapsed_seconds=self.downloader.elapsed_seconds())
+                    self._maybe_tag_music_track(url, path)
                 except DownloadCancelled:
                     self._threadsafe_log("Batch cancelled.")
                     status = "Cancelled"
@@ -2597,6 +2679,8 @@ class App(*_APP_BASES):
             self.batch_running = False
             self._batch_current_url = None
             self._prefetch_cancel = None
+            self._music_tag_map = {}
+            self._music_import_record_id = None
             finish_request(request_id)
             self.after(0, lambda: self._set_downloading_state(False, batch=True))
             self.after(0, self._refresh_history_tab)
@@ -3789,6 +3873,13 @@ class App(*_APP_BASES):
             side="left", padx=(8, 0))
 
         # ============================================================ #
+        # IMPORT FROM SPOTIFY
+        # ============================================================ #
+        self._section_header(scroll, "Import from Spotify")
+        from gui.music_import import build_spotify_settings_section
+        build_spotify_settings_section(self, scroll).pack(fill="x", padx=5, pady=(0, 15))
+
+        # ============================================================ #
         # ACCESSIBILITY
         # ============================================================ #
         self._section_header(scroll, "Accessibility")
@@ -4110,7 +4201,7 @@ class App(*_APP_BASES):
         ctk.CTkCheckBox(right, text="Beta", font=self.font_small, width=20, checkbox_width=16,
                         checkbox_height=16, variable=self._app_beta_var,
                         command=self._on_app_update_beta_changed).pack(side="left", padx=(0, 8))
-        self._app_update_btn = ctk.CTkButton(right, text="Download", width=90, font=self.font_normal,
+        self._app_update_btn = ctk.CTkButton(right, text="Update", width=90, font=self.font_normal,
                                               command=self._app_update_clicked)
         self._app_update_btn.pack(side="left")  # its own dedicated button, always visible
 
@@ -4136,12 +4227,9 @@ class App(*_APP_BASES):
             return
         self._app_row_detail.configure(text=info.get("detail", ""))
         self._app_row_dot.configure(text_color="#c0392b" if info.get("update_available") else "#2fa84f")
-        # The button is always shown (it's the dedicated app download/update
-        # button). Only its label changes: "Update" when an in-place update is
-        # waiting, "Download" otherwise (e.g. to grab a separate beta copy).
-        if self._app_update_btn.winfo_exists():
-            self._app_update_btn.configure(
-                text="Update" if info.get("update_available") else "Download")
+        # Dedicated, always-visible "Update" button. What it does when pressed
+        # depends on the Beta checkbox + whether an update is actually waiting
+        # (see _app_update_clicked); the label stays "Update" throughout.
 
     def _app_update_clicked(self):
         from core.app_update import is_frozen
@@ -4159,24 +4247,34 @@ class App(*_APP_BASES):
             return
 
         if beta:
+            beta_instance_url = info.get("beta_variant_url")
             choice = messagebox.askyesnocancel(
                 "Beta build",
                 "You have Beta builds turned on.\n\n"
                 f"Latest beta: {latest_txt}\n\n"
-                "Yes  - install it as a SEPARATE copy (your current install is left "
-                "alone; pick a different folder in the setup wizard).\n"
-                "No   - update THIS copy in place (Media Downloader closes to install).\n"
+                'Yes  - install it as a separate "Media Downloader Beta" that runs '
+                "alongside this one (its own settings/history; your current install "
+                "is untouched).\n"
+                "No   - update THIS copy to the beta in place (Media Downloader closes "
+                "to install).\n"
                 "Cancel - do nothing.")
             if choice is None:
                 return
-            if not latest_url:
-                messagebox.showinfo("Media Downloader",
-                                    "Couldn't find a download link for the latest beta.")
-                return
-            if choice:  # Yes -> separate copy
-                threading.Thread(target=self._download_app_instance,
-                                 args=(latest_url, latest), daemon=True).start()
-            else:       # No -> in-place update
+            if choice:  # Yes -> separate "Media Downloader Beta" instance
+                if not beta_instance_url:
+                    messagebox.showinfo(
+                        "Media Downloader",
+                        "This release doesn't have a separate-instance (\"-beta\") "
+                        'installer published yet. Choose "No" to update this copy '
+                        "instead.")
+                    return
+                threading.Thread(target=self._install_beta_instance,
+                                 args=(beta_instance_url, latest), daemon=True).start()
+            else:       # No -> in-place update to the beta
+                if not latest_url:
+                    messagebox.showinfo("Media Downloader",
+                                        "Couldn't find a download link for the latest beta.")
+                    return
                 threading.Thread(
                     target=self._run_dependency_action,
                     args=({"name": "Media Downloader", "kind": "app",
@@ -4199,12 +4297,14 @@ class App(*_APP_BASES):
                                 "url": info.get("url") or latest_url, "latest": latest},),
                          daemon=True).start()
 
-    def _download_app_instance(self, url, version):
-        """Beta 'install as a separate copy' path: download the installer,
-        reveal it in Explorer, and leave it to the user to run - the app is
-        NOT closed and the current install is NOT touched."""
+    def _install_beta_instance(self, url, version):
+        """Beta 'separate Media Downloader Beta' path: download the "-beta"
+        variant installer and launch it. That installer lays down a
+        side-by-side "Media Downloader Beta" with its own install folder,
+        Start-menu entry and %APPDATA%\\Media Downloader Beta settings - this
+        running copy is NOT closed and the stable install is untouched."""
         from core import app_update
-        self._threadsafe_log(f"Downloading Media Downloader {version or ''} installer...",
+        self._threadsafe_log(f"Downloading Media Downloader Beta {version or ''}...",
                              color="blue")
 
         def prog(got, total):
@@ -4216,18 +4316,18 @@ class App(*_APP_BASES):
             self._threadsafe_log(err, color="red")
             self.after(0, lambda: messagebox.showerror("Download failed", err))
             return
-        self._threadsafe_log(f"Installer saved to {path}", color="blue")
+        self._threadsafe_log("Launching the Media Downloader Beta installer "
+                             "(this copy stays open).", color="blue")
         try:
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
-        except Exception:
-            pass
+            os.startfile(path)  # noqa: S606 - our own installer
+        except Exception as e:
+            self.after(0, lambda err=e: messagebox.showerror(
+                "Couldn't start installer", str(err)))
+            return
         self.after(0, lambda: messagebox.showinfo(
-            "Installer downloaded",
-            f"The installer for {version or 'the latest beta'} was saved to:\n\n"
-            f"{path}\n\n"
-            "Run it to install a second copy. When the setup wizard asks where to "
-            "install, choose a different folder from your current copy so the two "
-            "don't overwrite each other."))
+            "Installing Media Downloader Beta",
+            "The Media Downloader Beta installer is starting. It installs as a "
+            "separate app - your current Media Downloader stays exactly as it is."))
 
     def _do_app_update(self, item):
         """Shared by the app-row Update button and Update All. Downloads the
