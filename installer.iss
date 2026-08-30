@@ -41,7 +41,7 @@
   #define OutBase "MediaDownloaderSetup-beta"
 #endif
 
-#define MyAppVersion "1.7.0"
+#define MyAppVersion "1.7.1"
 #define MyAppPublisher "Smith Media Industries inc."
 #define MyAppExeName "MediaDownloader.exe"
 #define MyDistFolder "MediaDownloader"
@@ -50,6 +50,15 @@
 AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+; An update/repair installs OVER the previous version in place: the same
+; AppId is detected, {app} is replaced, and the user's data folder
+; (%APPDATA%\<AppDataName>) is NEVER touched by an install - ALL settings,
+; the Spotify Client ID + token, history, playlists and library folders
+; carry across every update untouched. They are only removed by the
+; uninstaller (see CurUninstallStepChanged below, which wipes that folder).
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
+UsePreviousTasks=yes
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 ; If Smith Media Industries has a real website, uncomment and fill these

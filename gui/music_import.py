@@ -151,6 +151,79 @@ class _ImportUI:
             self._set_status("", "gray60"),
             messagebox.showerror("Import", msg)))
 
+    # -- called from the Download tab (paste a Spotify link there) ---- #
+    def resolve_and_autoqueue(self, text):
+        """Resolve `text` (a Spotify link), queue every confident match into
+        the batch queue right away, and - only if some tracks still need a
+        manual pick - switch to this tab with those loaded so the user can
+        sort them out. Runs on a worker; safe to call from the Download tab."""
+        self.input_box.delete("1.0", "end")
+        self.input_box.insert("1.0", text)
+        for w in self.results.winfo_children():
+            w.destroy()
+        self.row_widgets = []
+        self._cancel = threading.Event()
+        self._set_status("Reading the Spotify track list...", "gray60")
+        threading.Thread(target=self._autoqueue_worker, args=(text,), daemon=True).start()
+
+    def _autoqueue_worker(self, text):
+        app = self.app
+        client = get_spotify_client(app)
+
+        def prog(done, total, ref):
+            app.after(0, lambda: app._threadsafe_log(
+                f"Spotify import: matching {done}/{total} - {ref.title[:40]}"))
+
+        try:
+            session = music_import.build_session(
+                text, spotify_client=client, cfg=_match_cfg(app),
+                progress_cb=prog, cancel_event=self._cancel)
+        except (SpotifyError, ValueError) as e:
+            msg = str(e)
+            return app.after(0, lambda: messagebox.showerror("Spotify import", msg))
+        except Exception as e:
+            msg = f"Couldn't read that Spotify link: {e}"
+            return app.after(0, lambda: messagebox.showerror("Spotify import", msg))
+        app.after(0, lambda: self._autoqueue_finish(session))
+
+    def _autoqueue_finish(self, session):
+        confident, review = [], []
+        for mt in session.tracks:
+            if mt.download_url and mt.status == "confident":
+                confident.append(mt)
+            else:
+                review.append(mt)
+
+        if confident:
+            urls = [m.download_url for m in confident]
+            tag_map = {m.download_url: m.ref for m in confident}
+            self.app._start_music_import_download(session, confident, urls, tag_map)
+
+        if not review:
+            if not confident:
+                messagebox.showinfo("Spotify import",
+                                    "Couldn't match any of those tracks on YouTube.")
+            return
+
+        # Load just the unmatched/uncertain ones into this tab for a manual pass.
+        self.session = music_import.ImportSession(
+            source_text=session.source_text, kind=session.kind, name=session.name,
+            spotify_id=session.spotify_id, snapshot_id=session.snapshot_id, tracks=review)
+        self.resolve_btn.configure(state="normal", text="Resolve")
+        self._set_status(f'"{session.name}": {len(confident)} queued, '
+                         f"{len(review)} need you to pick a match below", "#d68910")
+        for i, mt in enumerate(review):
+            mt.selected = bool(mt.download_url)
+            self._build_row(i, mt)
+        self._refresh_summary()
+        self.app.tabview.set("Import")
+        messagebox.showinfo(
+            "Spotify import",
+            f"{len(confident)} track(s) are downloading now.\n\n"
+            f"{len(review)} couldn't be matched confidently - they're listed on the "
+            f"Import tab; pick a result (or paste a YouTube URL) and hit "
+            f"\"Download selected\".")
+
     # -- render the resolved list ------------------------------------ #
     def _show_session(self, session):
         self.session = session
@@ -300,9 +373,11 @@ class _ImportUI:
             diff = music_import.diff_for_resync(
                 import_id, get_spotify_client(app), cfg=_match_cfg(app))
         except (SpotifyError, ValueError) as e:
-            return app.after(0, lambda: messagebox.showerror("Re-sync", str(e)))
+            msg = str(e)
+            return app.after(0, lambda: messagebox.showerror("Re-sync", msg))
         except Exception as e:
-            return app.after(0, lambda: messagebox.showerror("Re-sync", f"Failed: {e}"))
+            msg = f"Failed: {e}"
+            return app.after(0, lambda: messagebox.showerror("Re-sync", msg))
         app.after(0, lambda: self._show_resync(import_id, diff))
 
     def _show_resync(self, import_id, diff):
@@ -334,6 +409,53 @@ class _ImportUI:
 def _fmt_dur(s):
     s = int(s or 0)
     return f"{s // 60}:{s % 60:02d}"
+
+
+def looks_like_spotify(text):
+    """True if `text` is a Spotify link / URI / the word 'liked'."""
+    try:
+        from core.spotify_client import parse_spotify_ref
+        parse_spotify_ref((text or "").strip())
+        return True
+    except Exception:
+        return False
+
+
+def try_handle_download_spotify(app, lines):
+    """Called from the Download tab's start_single_download / start_batch_download
+    BEFORE they hand anything to yt-dlp.
+
+    Returns:
+      "not_spotify" - no Spotify links; caller proceeds normally.
+      "handled"     - every line was a Spotify link; this took over
+                      (resolve -> queue confident matches -> Import tab for the
+                      rest). Caller must stop.
+      "mixed"       - Spotify links AND other URLs together; caller should show
+                      the returned message and stop.
+    """
+    items = [ln.strip() for ln in lines if ln and ln.strip()]
+    if not items:
+        return "not_spotify"
+    spotify = [x for x in items if looks_like_spotify(x)]
+    if not spotify:
+        return "not_spotify"
+    if len(spotify) != len(items):
+        messagebox.showinfo(
+            "Spotify link",
+            "Mixing a Spotify link with other URLs in one go isn't supported.\n\n"
+            "Put the Spotify link in on its own, or use the Import tab.")
+        return "mixed"
+    ui = getattr(app, "_music_import_ui", None)
+    if ui is None:
+        messagebox.showinfo("Spotify link", "Open the Import tab once, then try again.")
+        return "mixed"
+    if len(spotify) > 1:
+        messagebox.showinfo(
+            "Spotify links",
+            "One Spotify link at a time here - use the Import tab to queue several.")
+        return "mixed"
+    ui.resolve_and_autoqueue(spotify[0])
+    return "handled"
 
 
 # --------------------------------------------------------------------------- #
@@ -387,12 +509,11 @@ def build_spotify_settings_section(app, parent):
     box = ctk.CTkFrame(parent)
     box.grid_columnconfigure(1, weight=1)
 
-    ctk.CTkLabel(box, text="Import from Spotify", font=app.font_label).grid(
-        row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(10, 2))
-    ctk.CTkLabel(box, text="Uses your own free Spotify app (Client ID) - no password is "
-                 "stored. The account needs Spotify Premium (Spotify's 2026 rule).",
+    ctk.CTkLabel(box, text="Reads a Spotify track list and downloads each song from YouTube. "
+                 "Uses your own free Spotify app (Client ID) - no password is stored. The "
+                 "account needs Spotify Premium (Spotify's 2026 rule).",
                  font=app.font_small, text_color="gray60", wraplength=720, justify="left").grid(
-        row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 8))
+        row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(10, 8))
 
     ctk.CTkLabel(box, text="Client ID", font=app.font_normal).grid(
         row=2, column=0, sticky="w", padx=12, pady=4)
@@ -442,10 +563,12 @@ def build_spotify_settings_section(app, parent):
             try:
                 c.connect()
             except SpotifyError as e:
-                return app.after(0, lambda: (messagebox.showerror("Spotify", str(e)),
+                msg = str(e)
+                return app.after(0, lambda: (messagebox.showerror("Spotify", msg),
                                              _refresh_status()))
             except Exception as e:
-                return app.after(0, lambda: (messagebox.showerror("Spotify", f"Failed: {e}"),
+                msg = f"Failed: {e}"
+                return app.after(0, lambda: (messagebox.showerror("Spotify", msg),
                                              _refresh_status()))
             app.after(0, lambda: (_refresh_status(),
                                   messagebox.showinfo("Spotify", "Connected.")))
@@ -462,9 +585,10 @@ def build_spotify_settings_section(app, parent):
     ctk.CTkButton(btns, text="Connect", width=100, command=_connect).grid(row=0, column=1, padx=4)
     ctk.CTkButton(btns, text="Disconnect", width=100, fg_color="transparent", border_width=1,
                   command=_disconnect).grid(row=0, column=2, padx=4)
-    ctk.CTkButton(btns, text="How to get a Client ID", width=170, fg_color="transparent",
-                  border_width=1,
-                  command=lambda: _open_help()).grid(row=0, column=3, padx=4)
+    ctk.CTkButton(btns, text="Set up / walkthrough", width=170,
+                  command=lambda: SpotifySetupDialog(app, cid_entry, port_entry,
+                                                     _save_creds, _refresh_status)).grid(
+        row=0, column=3, padx=4)
 
     # match / tagging toggles
     tog = ctk.CTkFrame(box, fg_color="transparent")
@@ -489,6 +613,145 @@ def _toggle(app, parent, row, label, key):
                     command=on_change).grid(row=row, column=0, sticky="w", pady=2)
 
 
-def _open_help():
+class SpotifySetupDialog(ctk.CTkToplevel):
+    """A step-by-step walkthrough for connecting Spotify: it spells out
+    exactly what to click on Spotify's site, gives a one-click copy of the
+    redirect URI (the step people always get wrong), and has the Client ID
+    field + Connect button right here so it can be done without hunting
+    around the Settings page."""
+
+    STEPS = [
+        ("1.  Open the Spotify Developer Dashboard",
+         "Click the button below. Sign in with your normal Spotify account - it "
+         "must be a Spotify Premium account (Spotify blocked free accounts from "
+         "the API in 2026)."),
+        ("2.  Create an app",
+         'On the dashboard click "Create app". The App name and description can '
+         'be anything (e.g. "My Media Downloader"). Tick the Developer Terms box '
+         'and click Save.'),
+        ("3.  Add the redirect URI  (the important bit)",
+         'Open your new app, go to Settings, find "Redirect URIs", and paste the '
+         'address below EXACTLY - it must match character-for-character. Click '
+         '"Add", then Save at the bottom of the page.'),
+        ("4.  Copy your Client ID",
+         'Still on the app page (Settings or the top of the app\'s dashboard '
+         'page), copy the "Client ID" value. It is a long string of letters and '
+         'numbers. (You do NOT need the Client secret.)'),
+        ("5.  Paste it here and connect",
+         "Paste the Client ID into the box below, click Connect, and approve the "
+         "prompt in your browser. That's it - you only do this once."),
+    ]
+
+    def __init__(self, app, cid_entry, port_entry, save_creds, refresh_status):
+        super().__init__(app)
+        self.app = app
+        self._save_creds = save_creds
+        self._refresh_status = refresh_status
+        self._outer_cid = cid_entry
+        self._outer_port = port_entry
+        self.title("Connect Spotify - step by step")
+        self.geometry("620x620")
+        self.transient(app)
+        self.grab_set()
+        self.grid_columnconfigure(0, weight=1)
+
+        port = int(app.cfg.get("spotify_redirect_port", 8888) or 8888)
+        self.redirect_uri = f"http://127.0.0.1:{port}/callback"
+
+        wrap = ctk.CTkScrollableFrame(self)
+        wrap.grid(row=0, column=0, sticky="nsew", padx=14, pady=12)
+        wrap.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        r = 0
+        ctk.CTkLabel(wrap, text="Media Downloader can't download from Spotify - no app can. "
+                     "This connection just lets it read your playlist track lists; each song "
+                     "is then downloaded from YouTube.", font=app.font_small,
+                     text_color="gray60", wraplength=540, justify="left").grid(
+            row=r, column=0, sticky="w", pady=(0, 10)); r += 1
+
+        for title, body in self.STEPS:
+            ctk.CTkLabel(wrap, text=title, font=app.font_label, anchor="w").grid(
+                row=r, column=0, sticky="w", pady=(8, 2)); r += 1
+            ctk.CTkLabel(wrap, text=body, font=app.font_small, wraplength=540,
+                         justify="left", anchor="w").grid(row=r, column=0, sticky="w"); r += 1
+
+            if title.startswith("1."):
+                ctk.CTkButton(wrap, text="Open the Spotify Developer Dashboard", width=280,
+                              command=lambda: _open_url("https://developer.spotify.com/dashboard")).grid(
+                    row=r, column=0, sticky="w", pady=(4, 2)); r += 1
+            if title.startswith("3."):
+                uri_row = ctk.CTkFrame(wrap, fg_color="transparent")
+                uri_row.grid(row=r, column=0, sticky="ew", pady=(4, 2)); r += 1
+                uri_row.grid_columnconfigure(0, weight=1)
+                box = ctk.CTkEntry(uri_row, font=app.font_small)
+                box.insert(0, self.redirect_uri)
+                box.configure(state="readonly")
+                box.grid(row=0, column=0, sticky="ew")
+                ctk.CTkButton(uri_row, text="Copy", width=70,
+                              command=self._copy_uri).grid(row=0, column=1, padx=(6, 0))
+
+        ctk.CTkLabel(wrap, text="Client ID", font=app.font_normal).grid(
+            row=r, column=0, sticky="w", pady=(12, 2)); r += 1
+        self.cid = ctk.CTkEntry(wrap, font=app.font_normal)
+        self.cid.insert(0, app.cfg.get("spotify_client_id", "") or "")
+        self.cid.grid(row=r, column=0, sticky="ew"); r += 1
+
+        self.status = ctk.CTkLabel(wrap, text="", font=app.font_small, anchor="w",
+                                   wraplength=540, justify="left")
+        self.status.grid(row=r, column=0, sticky="w", pady=(6, 2)); r += 1
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
+        ctk.CTkButton(bar, text="Save & Connect", command=self._connect).pack(side="left")
+        ctk.CTkButton(bar, text="Close", fg_color="transparent", border_width=1,
+                      command=self.destroy).pack(side="left", padx=(8, 0))
+
+    def _copy_uri(self):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self.redirect_uri)
+            self.status.configure(text="Redirect URI copied - paste it into Spotify.",
+                                  text_color="#2fa84f")
+        except Exception:
+            pass
+
+    def _connect(self):
+        cid = self.cid.get().strip()
+        self.app.cfg["spotify_client_id"] = cid
+        self._outer_cid.delete(0, "end")
+        self._outer_cid.insert(0, cid)
+        self._save_creds()
+        client = get_spotify_client(self.app)
+        if not client.client_id:
+            self.status.configure(text="Enter your Client ID first.", text_color="#c0392b")
+            return
+        self.status.configure(text="Opening your browser to sign in...", text_color="gray60")
+
+        def worker():
+            try:
+                client.connect()
+            except SpotifyError as e:
+                msg = str(e)
+                return self.app.after(0, lambda: self.status.configure(
+                    text=msg, text_color="#c0392b"))
+            except Exception as e:
+                msg = f"Failed: {e}"
+                return self.app.after(0, lambda: self.status.configure(
+                    text=msg, text_color="#c0392b"))
+            self.app.after(0, self._connected)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _connected(self):
+        self.status.configure(text="Connected. You can close this window.",
+                              text_color="#2fa84f")
+        try:
+            self._refresh_status()
+        except Exception:
+            pass
+
+
+def _open_url(url):
     import webbrowser
-    webbrowser.open("https://developer.spotify.com/dashboard")
+    webbrowser.open(url)

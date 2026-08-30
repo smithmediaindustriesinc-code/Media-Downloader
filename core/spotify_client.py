@@ -33,18 +33,22 @@ import webbrowser
 from dataclasses import dataclass, field
 
 from core.track_ref import TrackRef
-
-try:
-    import keyring
-except Exception:  # pragma: no cover - keyring optional
-    keyring = None
+from core.secure_store import FileSecretStore
 
 AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 API_BASE = "https://api.spotify.com/v1"
 SCOPES = "playlist-read-private playlist-read-collaborative user-library-read"
 _UA = "MediaDownloader-spotify-import"
-_KEYRING_SERVICE = "MediaDownloader-Spotify"
+
+
+def _token_file():
+    """Where the Spotify refresh token is kept: under the app's own data
+    folder so it survives updates (installer never touches %APPDATA%) and
+    is removed on uninstall (the uninstaller wipes that folder). A beta
+    instance has its own folder, hence its own token."""
+    from core.paths import app_dir
+    return os.path.join(app_dir(), "options", "spotify_token.dat")
 
 
 class SpotifyError(Exception):
@@ -202,9 +206,9 @@ class SpotifyClient:
         self.redirect_uri = f"http://127.0.0.1:{self.redirect_port}/callback"
         self._access_token = None
         self._access_expires = 0.0
-        # token_store: optional (get()->str|None, set(str), clear()) for
-        # environments without keyring; defaults to keyring or in-memory.
-        self._token_store = token_store or _default_token_store(self.client_id)
+        # token_store: object with get()->str|None / set(str) / clear().
+        # Default = a DPAPI-protected file under the app data folder.
+        self._token_store = token_store or FileSecretStore(_token_file())
 
     # -- auth ------------------------------------------------------------- #
     @property
@@ -423,6 +427,9 @@ class SpotifyClient:
 # token storage
 # --------------------------------------------------------------------------- #
 class _MemoryStore:
+    """In-memory token store - only used when a caller passes it explicitly
+    (e.g. tests). The real default is a FileSecretStore, see __init__."""
+
     def __init__(self):
         self._v = None
 
@@ -434,32 +441,3 @@ class _MemoryStore:
 
     def clear(self):
         self._v = None
-
-
-class _KeyringStore:
-    def __init__(self, account):
-        self.account = account or "default"
-
-    def get(self):
-        try:
-            return keyring.get_password(_KEYRING_SERVICE, self.account)
-        except Exception:
-            return None
-
-    def set(self, v):
-        try:
-            keyring.set_password(_KEYRING_SERVICE, self.account, v)
-        except Exception:
-            pass
-
-    def clear(self):
-        try:
-            keyring.delete_password(_KEYRING_SERVICE, self.account)
-        except Exception:
-            pass
-
-
-def _default_token_store(client_id):
-    if keyring is not None:
-        return _KeyringStore(client_id or "default")
-    return _MemoryStore()

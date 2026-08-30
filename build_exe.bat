@@ -73,7 +73,6 @@ echo.
     --collect-data customtkinter ^
     --collect-all playwright ^
     --collect-all tkinterdnd2 ^
-    --collect-all keyring ^
     --collect-all syncedlyrics ^
     --collect-submodules mutagen ^
     --exclude-module pygame ^

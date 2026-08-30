@@ -1494,6 +1494,13 @@ class App(*_APP_BASES):
         if not url:
             messagebox.showwarning("Missing URL", "Enter a URL first.")
             return
+        from gui.music_import import looks_like_spotify
+        if looks_like_spotify(url):
+            messagebox.showinfo("Spotify link",
+                                "That's a Spotify link - just press Download and Media "
+                                "Downloader will read the track list and fetch each song "
+                                "from YouTube.")
+            return
         self._log(f"Fetching info for {url} ...")
         threading.Thread(target=self._fetch_info_thread, args=(url,), daemon=True).start()
 
@@ -1502,9 +1509,11 @@ class App(*_APP_BASES):
             info = fetch_info(url)
             self.after(0, lambda: self._apply_fetched_info(info))
         except DownloadStageError as e:
-            self.after(0, lambda: self._log(f"Could not fetch info ({e.stage}): {e.original}"))
+            m = f"Could not fetch info ({e.stage}): {e.original}"
+            self.after(0, lambda: self._log(m))
         except Exception as e:
-            self.after(0, lambda: self._log(f"Could not fetch info: {e}"))
+            m = f"Could not fetch info: {e}"
+            self.after(0, lambda: self._log(m))
 
     def _apply_fetched_info(self, info):
         title = sanitize_filename(beautify_title(info.get("title", "download")))
@@ -1930,6 +1939,12 @@ class App(*_APP_BASES):
         if self._single_download_busy():
             self._log("A download is already running - finish or cancel it first.")
             return
+
+        # A Spotify link pasted here is rerouted through the Spotify importer
+        # (resolve -> match on YouTube -> queue). "handled"/"mixed" -> stop.
+        from gui.music_import import try_handle_download_spotify
+        if try_handle_download_spotify(self, [url]) != "not_spotify":
+            return
         # Name is no longer required - if left blank, _run_single fetches
         # the video's own title and uses that instead.
 
@@ -2160,14 +2175,16 @@ class App(*_APP_BASES):
             self.after(0, lambda: self._set_downloading_state(False))
             return
         except PlaylistFetchTimeout as e:
-            self._threadsafe_log(str(e), color="red")
+            m = str(e)
+            self._threadsafe_log(m, color="red")
             self.after(0, lambda: self._set_downloading_state(False))
-            self.after(0, lambda: show_error("Playlist lookup timed out", str(e), parent=self))
+            self.after(0, lambda: show_error("Playlist lookup timed out", m, parent=self))
             return
         except DownloadStageError as e:
-            self._threadsafe_log(f"Could not read playlist ({e.stage}): {e.original}")
+            stage, orig = e.stage, str(e.original)
+            self._threadsafe_log(f"Could not read playlist ({stage}): {orig}")
             self.after(0, lambda: self._set_downloading_state(False))
-            self.after(0, lambda: show_error("Playlist lookup failed", str(e.original), parent=self))
+            self.after(0, lambda: show_error("Playlist lookup failed", orig, parent=self))
             return
 
         root = ensure_playlists_root(self.cfg.get("playlists_path") or fallback_out_dir)
@@ -2483,6 +2500,11 @@ class App(*_APP_BASES):
             return
         if self.batch_running:
             self._set_inline_status(self.batch_status_label, "A batch is already running.", "info")
+            return
+
+        # A Spotify link in the queue is rerouted through the Spotify importer.
+        from gui.music_import import try_handle_download_spotify
+        if try_handle_download_spotify(self, urls) != "not_spotify":
             return
 
         out_dir = self._resolve_output_dir()
@@ -3872,10 +3894,9 @@ class App(*_APP_BASES):
                              "download begins - you can Cancel during the pass. Off by default.").pack(
             side="left", padx=(8, 0))
 
-        # ============================================================ #
-        # IMPORT FROM SPOTIFY
-        # ============================================================ #
-        self._section_header(scroll, "Import from Spotify")
+        # "Import from Spotify" lives under Advanced (it's power-user setup:
+        # a Spotify Client ID, a redirect port, match/tagging toggles).
+        self._sub_header(scroll, "Import from Spotify")
         from gui.music_import import build_spotify_settings_section
         build_spotify_settings_section(self, scroll).pack(fill="x", padx=5, pady=(0, 15))
 
@@ -4631,8 +4652,23 @@ class App(*_APP_BASES):
         if self.cfg.get("auto_save_enabled", True):
             self._autosave_tick()
 
+    def _snapshot_window_geometry(self):
+        """Fold the window's current size/state into self.cfg so it's saved
+        even if the app is killed/crashes before _on_close_requested runs."""
+        try:
+            maximized = self.state() == "zoomed"
+            self.cfg["window_maximized"] = maximized
+            if not maximized:
+                self.cfg["window_width"] = self.winfo_width()
+                self.cfg["window_height"] = self.winfo_height()
+                self.cfg["window_x"] = self.winfo_x()
+                self.cfg["window_y"] = self.winfo_y()
+        except Exception:
+            pass
+
     def _autosave_tick(self):
         try:
+            self._snapshot_window_geometry()
             # Only write config.json when something actually changed since the
             # last write - this tick fires every few seconds for the whole
             # session and re-serializing an unchanged dict to disk is pure
@@ -4760,13 +4796,9 @@ class App(*_APP_BASES):
             # When maximized, winfo_width/height/x/y report the maximized
             # rectangle, not a useful floating size - so keep the last
             # NON-maximized size/position and just flag the maximized state.
-            is_maximized = self.state() == "zoomed"
-            self.cfg["window_maximized"] = is_maximized
-            if not is_maximized:
-                self.cfg["window_width"] = self.winfo_width()
-                self.cfg["window_height"] = self.winfo_height()
-                self.cfg["window_x"] = self.winfo_x()
-                self.cfg["window_y"] = self.winfo_y()
+            # (Same snapshot the autosave tick takes, so a crash loses at
+            # most one interval of window-size change, not the whole session.)
+            self._snapshot_window_geometry()
             save_config(self.cfg)
         except Exception:
             pass  # never let saving the size/position block the app from closing

@@ -106,6 +106,27 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.7.1
+
+- **Paste a Spotify link straight into the Download tab.** No need to switch
+  to the Import tab - paste a Spotify track/album/playlist link into Single
+  Download or the Batch Queue and press Download. Confident matches start
+  downloading immediately; if some tracks need a manual pick, it opens the
+  Import tab with just those loaded.
+- **Settings always survive an update.** Every update installs over the
+  previous version in place and never touches your data folder - all
+  settings, the Spotify Client ID and sign-in, history, playlists and
+  library folders carry across untouched. They are removed only when you
+  uninstall. The Spotify sign-in token now lives in the app's own data
+  folder (DPAPI-encrypted) instead of the Windows credential store, so it
+  follows the same rule. Window size/position is also saved periodically,
+  not just on a clean close.
+- **Step-by-step "Connect Spotify" walkthrough** - Settings ->
+  Advanced -> Import from Spotify -> "Set up / walkthrough": spells out
+  each click on Spotify's site, one-click copy of the redirect URI, and the
+  Client ID field + Connect button all in one place.
+- "Import from Spotify" settings moved under **Advanced**.
+
 ### 1.7.0
 
 - **Import from Spotify.** A new **Import** tab: paste a Spotify link

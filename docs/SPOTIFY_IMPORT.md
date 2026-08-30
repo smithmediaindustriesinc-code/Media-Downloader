@@ -21,18 +21,28 @@ Spotify account at all.
 You use **your own** free Spotify app. Media Downloader never sees or stores a
 password or client secret — sign-in is the PKCE flow.
 
-1. Go to <https://developer.spotify.com/dashboard> and log in.
-2. **Create app.** Name/description can be anything.
-3. In the app's **Settings**, add this **Redirect URI** exactly:
+The easiest way: **Settings → Advanced → Import from Spotify → "Set up /
+walkthrough"**. That dialog walks you through every step, gives you a one-click
+copy of the redirect URI, and has the Client ID field + Connect button right
+there.
+
+Doing it by hand:
+
+1. Go to <https://developer.spotify.com/dashboard> and log in with your normal
+   Spotify account. **It must be Spotify Premium** — since February 2026 Spotify
+   blocks API access for free accounts.
+2. Click **Create app.** App name and description can be anything; tick the
+   Developer Terms box; Save.
+3. Open the app → **Settings** → **Redirect URIs** → paste this **exactly**
+   (character-for-character) and click Add, then Save:
    `http://127.0.0.1:8888/callback`
    (if you change the port in Media Downloader's settings, match it here).
-4. Copy the **Client ID**.
-5. In Media Downloader: **Settings → Import from Spotify**, paste the Client ID,
-   click **Save**, then **Connect**. A browser tab opens; approve; done.
+4. Copy the **Client ID** (you do *not* need the Client secret).
+5. In Media Downloader: **Settings → Advanced → Import from Spotify**, paste the
+   Client ID, click **Save**, then **Connect**. A browser tab opens; approve; done.
 
-**Spotify Premium is required** on that account — since February 2026 Spotify
-blocks API access for free accounts. If you see a "Premium required" message,
-that's why.
+Your sign-in is remembered (encrypted, in the app's own data folder). It stays
+put across app updates and is only forgotten if you uninstall Media Downloader.
 
 ## Re-syncing a playlist
 
