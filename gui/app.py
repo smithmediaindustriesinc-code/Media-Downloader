@@ -656,23 +656,12 @@ class App(*_APP_BASES):
         self._last_mini_log_color = "gray60"
 
         # "Current Download: <name>   --- Queue item x/x ---" line, right under
-        # the mini log - issue #21. Blank when nothing is downloading.
+        # the mini log - issue #21. Blank when nothing is downloading. It has
+        # the whole left column to itself now (the "Up to date" save-status
+        # label moved to the right, under the internet indicator - #D3).
         self.current_download_label = ctk.CTkLabel(header, text="", font=self.font_small,
                                                    text_color="gray50", anchor="w")
         self.current_download_label.grid(row=3, column=0, sticky="w", pady=(0, 0))
-
-        # Save status - always visible (not gated to non-Download tabs
-        # like the log echo above it), right below it under the title.
-        # Turns to "Not saved" the INSTANT a tracked field actually
-        # changes (not waiting for a timer), but only turns back to
-        # "Up to date" after 3 consecutive auto-save cycles have passed
-        # with nothing new changing - see _update_save_status(), called
-        # from _autosave_tick.
-        self.save_status_label = ctk.CTkLabel(header, text="Up to date", font=self.font_small,
-                                               text_color="gray60", anchor="w")
-        self.save_status_label.grid(row=3, column=0, sticky="w", pady=(2, 0))
-        self._save_status_clean_ticks = 0
-        self._save_status_last_snapshot = None
 
         # Internet status indicator, top-right: one icon that swaps between
         # 4 pre-rendered images (rather than 4 separate widgets) so it
@@ -687,6 +676,14 @@ class App(*_APP_BASES):
         self.network_status_label.pack(side="left")
         self._network_icon_cache = {}
         self._start_network_monitor()
+
+        # Settings save status - moved here under the internet indicator so it
+        # stops overlapping the "Current Download" line on the left (#D3).
+        self.save_status_label = ctk.CTkLabel(header, text="Up to date", font=self.font_small,
+                                               text_color="gray60", anchor="e")
+        self.save_status_label.grid(row=1, column=1, sticky="e", pady=(2, 0))
+        self._save_status_clean_ticks = 0
+        self._save_status_last_snapshot = None
 
         self.dep_banner = ctk.CTkLabel(self, text="", font=self.font_small, text_color="#e0a020")
         self.dep_banner.grid(row=1, column=0, sticky="w", padx=20)
@@ -2173,6 +2170,7 @@ class App(*_APP_BASES):
             update_item(request_id, url, status="success", path=path,
                         elapsed_seconds=self.downloader.elapsed_seconds())
             self._notify_download_done(f"Downloaded \"{unique_name}\".")
+            self.after(0, self._clear_download_inputs)  # #8 - it's in History now
         except DownloadCancelled:
             self._threadsafe_log("Download cancelled.")
             status = "Cancelled"
@@ -2519,7 +2517,16 @@ class App(*_APP_BASES):
             return
         self._music_tag_map = dict(tag_map)
 
-        out_dir = self._resolve_output_dir() or ""
+        # A Spotify import is music - it goes in the Music folder, not Video,
+        # regardless of the Download tab's Type toggle (unless the user typed
+        # an explicit output folder). #4
+        explicit = self.output_entry.get().strip()
+        as_video = self.cfg.get("music_import_as_video", False)
+        if explicit:
+            out_dir = explicit
+        else:
+            out_dir = (self.cfg.get("video_path") if as_video
+                       else self.cfg.get("music_path")) or self._resolve_output_dir() or ""
         try:
             from core import music_import
             rec = music_import.record_from_session(session, out_dir, [])
@@ -2611,6 +2618,14 @@ class App(*_APP_BASES):
             if not out_dir:
                 messagebox.showerror("No download folder", "No output folder is available.")
                 return
+
+        # A Spotify import (tag map set) is music -> the Music folder, unless
+        # the user typed an explicit output folder or turned on "as video". #4
+        if getattr(self, "_music_tag_map", None) and not self.output_entry.get().strip():
+            music_dir = (self.cfg.get("video_path") if self.cfg.get("music_import_as_video")
+                         else self.cfg.get("music_path"))
+            if music_dir:
+                out_dir = music_dir
 
         ffmpeg_ok, _ = deps.check_ffmpeg()
         if not ffmpeg_ok:
@@ -2803,6 +2818,7 @@ class App(*_APP_BASES):
             self._threadsafe_log("Batch queue finished.", color="green")
             if not self._cancel_requested:
                 self._notify_download_done(f"Queue finished - {total} item(s).")
+                self.after(0, self._clear_download_inputs)  # #8
         finally:
             self.batch_running = False
             self._batch_current_url = None
@@ -2815,6 +2831,18 @@ class App(*_APP_BASES):
             self.after(0, self._refresh_requests_tab)
 
     # ------------------------------------------------------------------ #
+    def _clear_download_inputs(self):
+        """After a finished download, wipe the URL + name fields - the info
+        is in the History tab now (#8). Batch queue is left alone."""
+        try:
+            self.url_entry.delete(0, "end")
+            self.name_entry.delete(0, "end")
+            if hasattr(self, "queue_name_entry"):
+                self.queue_name_entry.delete(0, "end")
+            self._clear_thumbnail()
+        except Exception as e:
+            log_error("clear_download_inputs", e)
+
     def _set_current_download(self, name="", pos=""):
         """The 'Current Download: ...   --- Queue item x/x ---' header line."""
         if not hasattr(self, "current_download_label"):
