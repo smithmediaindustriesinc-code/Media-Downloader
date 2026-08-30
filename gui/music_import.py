@@ -117,27 +117,62 @@ class _ImportUI:
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(5, weight=1)
 
-        # -- your playlists ------------------------------------------------ #
-        plw = ctk.CTkFrame(parent, fg_color="transparent")
-        plw.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
-        plw.grid_columnconfigure(0, weight=1)
-        hdr = ctk.CTkFrame(plw, fg_color="transparent")
+        # -- top: search (left) | your playlists (right), equal height ----- #
+        top = ctk.CTkFrame(parent, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        top.grid_columnconfigure(0, weight=1, uniform="mi")
+        top.grid_columnconfigure(1, weight=1, uniform="mi")
+        _COL_H = 190
+
+        # left: search
+        left = ctk.CTkFrame(top, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(left, text="Search Spotify", font=app.font_label).grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        self.search_entry = ctk.CTkEntry(left, font=app.font_normal,
+                                         placeholder_text="song or playlist name")
+        self.search_entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.search_entry.bind("<Return>", lambda e: self._search_clicked())
+        ctk.CTkButton(left, text="✕", width=28, font=app.font_small, fg_color="gray40",
+                      hover_color="gray30",
+                      command=lambda: self.search_entry.delete(0, "end")).grid(
+            row=1, column=1, padx=(4, 0), pady=(4, 0))
+        ctk.CTkButton(left, text="Search", width=70, font=app.font_small,
+                      command=self._search_clicked).grid(row=1, column=2, padx=(4, 0), pady=(4, 0))
+        self.search_frame = ctk.CTkScrollableFrame(left, height=_COL_H, label_text="")
+        self.search_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(4, 0))
+        self.search_frame.grid_columnconfigure(0, weight=1)
+
+        # right: your playlists
+        right = ctk.CTkFrame(top, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        right.grid_columnconfigure(0, weight=1)
+        hdr = ctk.CTkFrame(right, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew")
         hdr.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(hdr, text="Your Spotify playlists", font=app.font_label).grid(
             row=0, column=0, sticky="w")
         ctk.CTkButton(hdr, text="Refresh", width=80, font=app.font_small,
                       command=self.refresh_my_playlists).grid(row=0, column=1)
-        self.playlists_frame = ctk.CTkScrollableFrame(plw, height=140, label_text="")
-        self.playlists_frame.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.playlists_frame = ctk.CTkScrollableFrame(right, height=_COL_H, label_text="")
+        self.playlists_frame.grid(row=1, column=0, sticky="nsew", pady=(4 + 6, 0))
         self.playlists_frame.grid_columnconfigure(0, weight=1)
 
+        # -- paste box ---------------------------------------------------- #
         ctk.CTkLabel(parent, text="...or paste a Spotify link / an \"Artist - Title\" "
                      "list / CSV:", font=app.font_label).grid(
             row=1, column=0, sticky="w", padx=12, pady=(10, 2))
 
-        self.input_box = ctk.CTkTextbox(parent, height=70, font=app.font_normal)
-        self.input_box.grid(row=2, column=0, sticky="ew", padx=12)
+        pbox = ctk.CTkFrame(parent, fg_color="transparent")
+        pbox.grid(row=2, column=0, sticky="ew", padx=12)
+        pbox.grid_columnconfigure(0, weight=1)
+        self.input_box = ctk.CTkTextbox(pbox, height=64, font=app.font_normal)
+        self.input_box.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(pbox, text="✕", width=28, font=app.font_small, fg_color="gray40",
+                      hover_color="gray30",
+                      command=lambda: self.input_box.delete("1.0", "end")).grid(
+            row=0, column=1, padx=(4, 0), sticky="n")
 
         bar = ctk.CTkFrame(parent, fg_color="transparent")
         bar.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 4))
@@ -212,6 +247,75 @@ class _ImportUI:
             ctk.CTkButton(row, text="Download", width=90, font=self.app.font_small,
                           command=lambda r=ref: self.resolve_and_autoqueue(r)).grid(
                 row=0, column=1, padx=6, pady=3)
+
+    # -- search -------------------------------------------------------- #
+    def _search_clicked(self):
+        q = self.search_entry.get().strip()
+        for w in self.search_frame.winfo_children():
+            w.destroy()
+        if not q:
+            return
+        client = get_spotify_client(self.app)
+        if not client.is_connected:
+            ctk.CTkLabel(self.search_frame, text="Connect Spotify first (Settings -> Advanced).",
+                         font=self.app.font_small, text_color="gray55").grid(row=0, column=0, sticky="w")
+            return
+        ctk.CTkLabel(self.search_frame, text="Searching...", font=self.app.font_small,
+                     text_color="gray55").grid(row=0, column=0, sticky="w")
+        threading.Thread(target=self._search_worker, args=(q,), daemon=True).start()
+
+    def _search_worker(self, q):
+        app = self.app
+        try:
+            res = get_spotify_client(app).search(q, kinds=("track", "playlist"), limit=15)
+        except (SpotifyError, ValueError) as e:
+            msg = str(e)
+            return app.after(0, lambda: self._render_search(None, msg))
+        except Exception as e:
+            msg = f"Search failed: {e}"
+            return app.after(0, lambda: self._render_search(None, msg))
+        app.after(0, lambda: self._render_search(res, None))
+
+    def _render_search(self, res, err):
+        for w in self.search_frame.winfo_children():
+            w.destroy()
+        if err:
+            ctk.CTkLabel(self.search_frame, text=err, font=self.app.font_small,
+                         text_color="#c0392b", wraplength=360, justify="left").grid(
+                row=0, column=0, sticky="w")
+            return
+        r = 0
+        pls = res.get("playlists") or []
+        if pls:
+            ctk.CTkLabel(self.search_frame, text="Playlists", font=self.app.font_small,
+                         text_color="gray50").grid(row=r, column=0, sticky="w", pady=(2, 0)); r += 1
+        for pl in pls:
+            row = ctk.CTkFrame(self.search_frame)
+            row.grid(row=r, column=0, sticky="ew", pady=1); r += 1
+            row.grid_columnconfigure(0, weight=1)
+            n = pl.get("tracks_total")
+            sub = f"  ({n})" if isinstance(n, int) else ""
+            ctk.CTkLabel(row, text=(pl["name"] + sub)[:44], font=self.app.font_small,
+                         anchor="w").grid(row=0, column=0, sticky="ew", padx=6)
+            ctk.CTkButton(row, text="Download", width=84, font=self.app.font_small,
+                          command=lambda pid=pl["id"]: self.resolve_and_autoqueue(
+                              f"spotify:playlist:{pid}")).grid(row=0, column=1, padx=6, pady=2)
+        tracks = res.get("tracks") or []
+        if tracks:
+            ctk.CTkLabel(self.search_frame, text="Songs", font=self.app.font_small,
+                         text_color="gray50").grid(row=r, column=0, sticky="w", pady=(4, 0)); r += 1
+        for tr in tracks:
+            row = ctk.CTkFrame(self.search_frame)
+            row.grid(row=r, column=0, sticky="ew", pady=1); r += 1
+            row.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(row, text=f"{tr.title} - {tr.artist_str}"[:44],
+                         font=self.app.font_small, anchor="w").grid(row=0, column=0, sticky="ew", padx=6)
+            ctk.CTkButton(row, text="Download", width=84, font=self.app.font_small,
+                          command=lambda sid=tr.spotify_id: self.resolve_and_autoqueue(
+                              f"spotify:track:{sid}")).grid(row=0, column=1, padx=6, pady=2)
+        if not pls and not tracks:
+            ctk.CTkLabel(self.search_frame, text="No results.", font=self.app.font_small,
+                         text_color="gray55").grid(row=0, column=0, sticky="w")
 
     # -- resolve ------------------------------------------------------- #
     def _resolve_clicked(self):
