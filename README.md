@@ -106,6 +106,34 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.7.0
+
+- **Import from Spotify.** A new **Import** tab: paste a Spotify link
+  (track / album / playlist / artist), or your **Liked Songs**, or a plain
+  "Artist - Title" list / CSV. Media Downloader reads the track list from
+  Spotify's API, finds each song on YouTube, downloads it with the normal
+  queue, and writes the real title / artist / album / track number / ISRC
+  and the album art + lyrics onto the file. **The audio is a YouTube match,
+  not the Spotify recording** - the tab says so and every file gets a
+  comment tag noting it. Confident matches download automatically; anything
+  uncertain waits for you to pick. Spotify playlists can be **re-synced**
+  later to pull in new tracks.
+  - Setup (Settings -> Import from Spotify): create a free app at
+    developer.spotify.com/dashboard, add the redirect URI it shows you,
+    paste the **Client ID** (no password or secret is stored - sign-in is
+    PKCE), and click Connect. The account needs Spotify Premium (Spotify's
+    2026 API rule).
+- **One unified installer.** `MediaDownloaderSetup.exe` is now a small
+  bootstrapper: it lists every released version (latest stable selected;
+  a checkbox reveals beta builds), downloads the one you pick from the
+  releases repo, checks its SHA-256, and installs it. The full per-version
+  installers are still there as the download targets.
+- **In-app updater rework.** The Version tab's button is always **Update**.
+  With **Beta** ticked, pressing it asks whether to update this copy in
+  place or install a separate **Media Downloader Beta** that runs alongside
+  your stable copy with its own settings.
+- Licensed under the GNU GPL v3 (see `LICENSE`).
+
 ### 1.6.10
 
 Closes out the 1.6.x line and rolls the whole thing (1.6.1–1.6.10) up into one
