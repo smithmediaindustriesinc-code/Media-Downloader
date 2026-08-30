@@ -4111,7 +4111,7 @@ class App(*_APP_BASES):
         ctk.CTkCheckBox(right, text="Beta", font=self.font_small, width=20, checkbox_width=16,
                         checkbox_height=16, variable=self._app_beta_var,
                         command=self._on_app_update_beta_changed).pack(side="left", padx=(0, 8))
-        self._app_update_btn = ctk.CTkButton(right, text="Download", width=90, font=self.font_normal,
+        self._app_update_btn = ctk.CTkButton(right, text="Update", width=90, font=self.font_normal,
                                               command=self._app_update_clicked)
         self._app_update_btn.pack(side="left")  # its own dedicated button, always visible
 
@@ -4137,12 +4137,9 @@ class App(*_APP_BASES):
             return
         self._app_row_detail.configure(text=info.get("detail", ""))
         self._app_row_dot.configure(text_color="#c0392b" if info.get("update_available") else "#2fa84f")
-        # The button is always shown (it's the dedicated app download/update
-        # button). Only its label changes: "Update" when an in-place update is
-        # waiting, "Download" otherwise (e.g. to grab a separate beta copy).
-        if self._app_update_btn.winfo_exists():
-            self._app_update_btn.configure(
-                text="Update" if info.get("update_available") else "Download")
+        # Dedicated, always-visible "Update" button. What it does when pressed
+        # depends on the Beta checkbox + whether an update is actually waiting
+        # (see _app_update_clicked); the label stays "Update" throughout.
 
     def _app_update_clicked(self):
         from core.app_update import is_frozen
@@ -4160,24 +4157,34 @@ class App(*_APP_BASES):
             return
 
         if beta:
+            beta_instance_url = info.get("beta_variant_url")
             choice = messagebox.askyesnocancel(
                 "Beta build",
                 "You have Beta builds turned on.\n\n"
                 f"Latest beta: {latest_txt}\n\n"
-                "Yes  - install it as a SEPARATE copy (your current install is left "
-                "alone; pick a different folder in the setup wizard).\n"
-                "No   - update THIS copy in place (Media Downloader closes to install).\n"
+                'Yes  - install it as a separate "Media Downloader Beta" that runs '
+                "alongside this one (its own settings/history; your current install "
+                "is untouched).\n"
+                "No   - update THIS copy to the beta in place (Media Downloader closes "
+                "to install).\n"
                 "Cancel - do nothing.")
             if choice is None:
                 return
-            if not latest_url:
-                messagebox.showinfo("Media Downloader",
-                                    "Couldn't find a download link for the latest beta.")
-                return
-            if choice:  # Yes -> separate copy
-                threading.Thread(target=self._download_app_instance,
-                                 args=(latest_url, latest), daemon=True).start()
-            else:       # No -> in-place update
+            if choice:  # Yes -> separate "Media Downloader Beta" instance
+                if not beta_instance_url:
+                    messagebox.showinfo(
+                        "Media Downloader",
+                        "This release doesn't have a separate-instance (\"-beta\") "
+                        'installer published yet. Choose "No" to update this copy '
+                        "instead.")
+                    return
+                threading.Thread(target=self._install_beta_instance,
+                                 args=(beta_instance_url, latest), daemon=True).start()
+            else:       # No -> in-place update to the beta
+                if not latest_url:
+                    messagebox.showinfo("Media Downloader",
+                                        "Couldn't find a download link for the latest beta.")
+                    return
                 threading.Thread(
                     target=self._run_dependency_action,
                     args=({"name": "Media Downloader", "kind": "app",
@@ -4200,12 +4207,14 @@ class App(*_APP_BASES):
                                 "url": info.get("url") or latest_url, "latest": latest},),
                          daemon=True).start()
 
-    def _download_app_instance(self, url, version):
-        """Beta 'install as a separate copy' path: download the installer,
-        reveal it in Explorer, and leave it to the user to run - the app is
-        NOT closed and the current install is NOT touched."""
+    def _install_beta_instance(self, url, version):
+        """Beta 'separate Media Downloader Beta' path: download the "-beta"
+        variant installer and launch it. That installer lays down a
+        side-by-side "Media Downloader Beta" with its own install folder,
+        Start-menu entry and %APPDATA%\\Media Downloader Beta settings - this
+        running copy is NOT closed and the stable install is untouched."""
         from core import app_update
-        self._threadsafe_log(f"Downloading Media Downloader {version or ''} installer...",
+        self._threadsafe_log(f"Downloading Media Downloader Beta {version or ''}...",
                              color="blue")
 
         def prog(got, total):
@@ -4217,18 +4226,18 @@ class App(*_APP_BASES):
             self._threadsafe_log(err, color="red")
             self.after(0, lambda: messagebox.showerror("Download failed", err))
             return
-        self._threadsafe_log(f"Installer saved to {path}", color="blue")
+        self._threadsafe_log("Launching the Media Downloader Beta installer "
+                             "(this copy stays open).", color="blue")
         try:
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
-        except Exception:
-            pass
+            os.startfile(path)  # noqa: S606 - our own installer
+        except Exception as e:
+            self.after(0, lambda err=e: messagebox.showerror(
+                "Couldn't start installer", str(err)))
+            return
         self.after(0, lambda: messagebox.showinfo(
-            "Installer downloaded",
-            f"The installer for {version or 'the latest beta'} was saved to:\n\n"
-            f"{path}\n\n"
-            "Run it to install a second copy. When the setup wizard asks where to "
-            "install, choose a different folder from your current copy so the two "
-            "don't overwrite each other."))
+            "Installing Media Downloader Beta",
+            "The Media Downloader Beta installer is starting. It installs as a "
+            "separate app - your current Media Downloader stays exactly as it is."))
 
     def _do_app_update(self, item):
         """Shared by the app-row Update button and Update All. Downloads the
