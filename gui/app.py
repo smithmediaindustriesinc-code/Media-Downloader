@@ -42,7 +42,8 @@ from core.history import (load_history, add_entry, update_entry, clear_history, 
 from core.playlists import (list_playlists, create_playlist, delete_playlist, playlist_path,
                              playlist_contents, add_file_to_playlist, remove_file_from_playlist,
                              ensure_playlists_root, import_folder_as_playlist)
-from core.paths import resource_path, ensure_media_folders, ensure_playlists_folder, app_dir, install_dir
+from core.paths import (resource_path, ensure_media_folders, ensure_playlists_folder, app_dir,
+                        install_dir, instance_name)
 from core import dependencies as deps
 from gui.scrollable_dropdown import ScrollableDropdown
 from gui.dialogs import MoveFilesDialog, NewPlaylistDialog
@@ -191,7 +192,7 @@ class App(*_APP_BASES):
         apply_color_theme(self.cfg["color_theme"])
         mark("appearance mode + color theme set")
 
-        self.title("Media Downloader")
+        self.title(instance_name())
         self._apply_launch_geometry()
         self.minsize(700, 600)
         self.resizable(True, True)
@@ -590,7 +591,7 @@ class App(*_APP_BASES):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=20, pady=(15, 5))
         header.grid_columnconfigure(0, weight=1)
-        title_label = ctk.CTkLabel(header, text="Media Downloader", font=self.font_title)
+        title_label = ctk.CTkLabel(header, text=instance_name(), font=self.font_title)
         title_label.grid(row=0, column=0, sticky="w")
 
         # Mini progress bar, shown only on tabs OTHER than Download (where

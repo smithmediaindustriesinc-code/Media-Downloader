@@ -18,21 +18,46 @@ def _entry_script_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def instance_name():
+    """The app instance's display name - normally "Media Downloader".
+
+    A "beta instance" build (installed side-by-side with the stable copy by
+    the in-app updater's "install the beta as a separate copy" option) is
+    produced by compiling installer.iss with /DBETA; that installer drops an
+    `instance.flag` file next to the .exe whose contents are "beta". When
+    that flag is present this returns "Media Downloader Beta", so the beta
+    keeps its own %APPDATA%\\Media Downloader Beta folder and window title
+    and can't disturb the stable install's settings/history.
+
+    Running from source (no flag) it is always "Media Downloader"."""
+    try:
+        flag = os.path.join(install_dir(), "instance.flag")
+        if os.path.isfile(flag):
+            with open(flag, "r", encoding="utf-8", errors="ignore") as fh:
+                if fh.read().strip().lower() == "beta":
+                    return "Media Downloader Beta"
+    except Exception:
+        pass
+    return "Media Downloader"
+
+
 def app_dir():
     """Folder where writable app data (config, history, playlists, ffmpeg/)
     lives.
     - Normal run (python main.py): wherever main.py is - see
       _entry_script_dir(). Works no matter what folder you run the command
       from.
-    - Frozen .exe on Windows: %APPDATA%\\Media Downloader. The .exe itself
-      often lives in C:\\Program Files\\..., which regular (non-admin) users
-      can't write to - saving there causes a silent PermissionError. Per-user
-      AppData is where Windows apps are supposed to keep this kind of data.
+    - Frozen .exe on Windows: %APPDATA%\\<instance_name()> (normally
+      "Media Downloader"; "Media Downloader Beta" for a beta instance). The
+      .exe itself often lives in C:\\Program Files\\..., which regular
+      (non-admin) users can't write to - saving there causes a silent
+      PermissionError. Per-user AppData is where Windows apps are supposed
+      to keep this kind of data.
     - Frozen .exe elsewhere (Mac/Linux): folder the executable sits in."""
     if getattr(sys, "frozen", False):
         if os.name == "nt":
             base = os.environ.get("APPDATA") or os.path.expanduser("~")
-            path = os.path.join(base, "Media Downloader")
+            path = os.path.join(base, instance_name())
             os.makedirs(path, exist_ok=True)
             return path
         return os.path.dirname(sys.executable)
