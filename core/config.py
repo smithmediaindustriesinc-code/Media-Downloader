@@ -156,6 +156,11 @@ DEFAULT_CONFIG = {
     "music_embed_lyrics": True,     # fetch + embed lyrics (syncedlyrics).
     "music_tag_source_comment": True,  # write a comment tag noting the audio
                             # is a YouTube match, not the original master.
+    "music_import_as_video": False,  # a Spotify import downloads AUDIO only by
+                            # default (smaller, faster - it's music). Turn this
+                            # on to grab the music video instead, in which case
+                            # the normal video quality / aspect / subtitle
+                            # settings apply.
 }
 
 

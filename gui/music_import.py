@@ -698,13 +698,16 @@ def build_spotify_settings_section(app, parent):
     _toggle(app, tog, 1, "Embed album art", "music_embed_cover")
     _toggle(app, tog, 2, "Embed lyrics", "music_embed_lyrics")
     _toggle(app, tog, 3, "Add \"matched from YouTube\" comment tag", "music_tag_source_comment")
+    _toggle(app, tog, 4, "Download the music video instead of audio-only "
+            "(uses the normal video quality / aspect / subtitle settings)",
+            "music_import_as_video", default=False)
 
     _refresh_status()
     return box
 
 
-def _toggle(app, parent, row, label, key):
-    var = ctk.BooleanVar(value=bool(app.cfg.get(key, True)))
+def _toggle(app, parent, row, label, key, default=True):
+    var = ctk.BooleanVar(value=bool(app.cfg.get(key, default)))
 
     def on_change():
         app.cfg[key] = var.get()

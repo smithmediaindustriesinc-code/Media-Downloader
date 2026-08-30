@@ -2594,6 +2594,12 @@ class App(*_APP_BASES):
 
     def _run_batch(self, urls, out_dir, custom_name=None):
         dtype = self.type_var.get()
+        # A Spotify import (has a tag map) downloads audio only by default -
+        # it's music, so this saves space + time. "Download as video" in the
+        # Spotify settings flips it back to video (with the normal video
+        # quality / aspect / subtitle settings then applying).
+        if getattr(self, "_music_tag_map", None) and not self.cfg.get("music_import_as_video", False):
+            dtype = "Audio"
         total = len(urls)
         request_id = start_request(dtype, "queue", urls, custom_name=custom_name, out_dir=out_dir)
         delay_s = max(0, self.cfg.get("batch_delay_seconds", 0))
