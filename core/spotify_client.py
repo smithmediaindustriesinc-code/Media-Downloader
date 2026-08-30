@@ -418,6 +418,25 @@ class SpotifyClient:
             return ResolvedImport("saved", "Liked Songs", tracks=refs)
         raise SpotifyError(f"Can't import a Spotify {kind}.")
 
+    def list_my_playlists(self):
+        """The signed-in user's own + followed playlists, plus a synthetic
+        'Liked Songs' row first. Each: {id, name, tracks_total, owner, kind}.
+        'Liked Songs' has id='' and kind='saved'."""
+        out = [{"id": "", "name": "Liked Songs", "tracks_total": None,
+                "owner": "you", "kind": "saved"}]
+        first = self._get("/me/playlists", {"limit": 50})
+        for pl in self._paged(first):
+            if not pl:
+                continue
+            out.append({
+                "id": pl.get("id", ""),
+                "name": pl.get("name", "(untitled)"),
+                "tracks_total": (pl.get("tracks") or {}).get("total"),
+                "owner": (pl.get("owner") or {}).get("display_name", ""),
+                "kind": "playlist",
+            })
+        return out
+
     def playlist_snapshot(self, playlist_id):
         """Just the current snapshot_id - cheap check for re-sync."""
         return self._get(f"/playlists/{playlist_id}",

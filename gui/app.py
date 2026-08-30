@@ -669,7 +669,6 @@ class App(*_APP_BASES):
         # below, since Version needs to stay last).
         tab_download = self.tabview.add("Download")
         tab_media = self.tabview.add("Media")
-        tab_import = self.tabview.add("Import")
         tab_history = self.tabview.add("History")
         tab_settings = self.tabview.add("Settings")
         tab_more = self.tabview.add("More")
@@ -677,8 +676,6 @@ class App(*_APP_BASES):
 
         self._build_download_tab(tab_download)
         self._build_media_tab(tab_media)
-        from gui.music_import import build_import_tab
-        build_import_tab(self, tab_import)
         self._build_history_tab(tab_history)
         self._build_settings_tab(tab_settings)
         self._build_more_tab(tab_more)
@@ -700,7 +697,6 @@ class App(*_APP_BASES):
         # actually exists (it's added dynamically, well after this runs).
         self._apply_tab_icon("Download")
         self._apply_tab_icon("Media")
-        self._apply_tab_icon("Import")
         self._apply_tab_icon("History")
         self._apply_tab_icon("Settings")
         self._apply_tab_icon("More")
@@ -795,6 +791,13 @@ class App(*_APP_BASES):
             playlist_out_row, ["Select a Playlist..."], self.output_playlist_var,
             font=self.font_normal, width=320, command=self._on_output_playlist_selected)
         self.output_playlist_dropdown.pack(fill="x")
+
+        spotify_row = ctk.CTkFrame(shared, fg_color="transparent")
+        spotify_row.grid(row=5, column=0, columnspan=4, sticky="ew", padx=15, pady=(0, 12))
+        ctk.CTkButton(spotify_row, text="Import from Spotify...", font=self.font_normal,
+                      command=lambda: self._open_spotify_dialog()).pack(side="left")
+        ctk.CTkLabel(spotify_row, text="  (or just paste a Spotify link in the box below)",
+                     font=self.font_small, text_color="gray55").pack(side="left")
 
         self.inner_tabview = ctk.CTkTabview(outer, height=260)
         self.inner_tabview.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
@@ -2413,6 +2416,10 @@ class App(*_APP_BASES):
                                   "ETAs will use the item-count estimate.", color="blue")
 
     # ------------------------------------------------------------------ #
+    def _open_spotify_dialog(self):
+        from gui.music_import import open_spotify_dialog
+        open_spotify_dialog(self)
+
     def _start_music_import_download(self, session, picked, urls, tag_map,
                                      existing_import_id=None):
         """Hand a resolved Spotify/pasted import to the normal batch queue.

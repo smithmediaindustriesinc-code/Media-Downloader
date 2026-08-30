@@ -45,54 +45,115 @@ def get_spotify_client(app):
 
 
 # --------------------------------------------------------------------------- #
-# the tab
+# The Spotify dialog (replaces the old Import tab). One per app, hidden when
+# closed so it re-opens instantly with its state intact.
 # --------------------------------------------------------------------------- #
-def build_import_tab(app, tab):
-    ui = _ImportUI(app, tab)
-    app._music_import_ui = ui
-    return ui
+def open_spotify_dialog(app):
+    dlg = getattr(app, "_spotify_dialog", None)
+    if dlg is None or not dlg.winfo_exists():
+        dlg = SpotifyDialog(app)
+        app._spotify_dialog = dlg
+    dlg.show()
+    return dlg
+
+
+def _get_import_ui(app):
+    """The _ImportUI, creating the (hidden) dialog if needed. Used by the
+    Download-tab Spotify handoff, which only shows the dialog if some tracks
+    need a manual pick."""
+    dlg = getattr(app, "_spotify_dialog", None)
+    if dlg is None or not dlg.winfo_exists():
+        dlg = SpotifyDialog(app)
+        app._spotify_dialog = dlg
+        dlg.withdraw()
+    return dlg.ui
+
+
+class SpotifyDialog(ctk.CTkToplevel):
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title("Import from Spotify")
+        self.geometry("840x720")
+        self.minsize(640, 520)
+        self.protocol("WM_DELETE_WINDOW", self.hide)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
+        top.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(top, text=_BANNER, font=app.font_small, wraplength=780,
+                     justify="left", text_color="gray60").grid(row=0, column=0, sticky="w")
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        self.ui = _ImportUI(app, body, host=self)
+        app._music_import_ui = self.ui
+
+    def show(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        try:
+            self.ui.refresh_my_playlists()
+        except Exception:
+            pass
+
+    def hide(self):
+        self.withdraw()
 
 
 class _ImportUI:
-    def __init__(self, app, tab):
+    def __init__(self, app, parent, host=None):
         self.app = app
+        self.host = host
         self.session = None            # music_import.ImportSession
         self.row_widgets = []          # per-track row dicts
         self._cancel = None            # threading.Event during a resolve
 
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(4, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(5, weight=1)
 
-        ctk.CTkLabel(tab, text=_BANNER, font=app.font_small, wraplength=760,
-                     justify="left", text_color="gray60").grid(
-            row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+        # -- your playlists ------------------------------------------------ #
+        plw = ctk.CTkFrame(parent, fg_color="transparent")
+        plw.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        plw.grid_columnconfigure(0, weight=1)
+        hdr = ctk.CTkFrame(plw, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew")
+        hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(hdr, text="Your Spotify playlists", font=app.font_label).grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkButton(hdr, text="Refresh", width=80, font=app.font_small,
+                      command=self.refresh_my_playlists).grid(row=0, column=1)
+        self.playlists_frame = ctk.CTkScrollableFrame(plw, height=140, label_text="")
+        self.playlists_frame.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.playlists_frame.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(tab, text="Paste a Spotify link, or a list of \"Artist - Title\" "
-                     "lines / CSV:", font=app.font_label).grid(
-            row=1, column=0, sticky="w", padx=12, pady=(6, 2))
+        ctk.CTkLabel(parent, text="...or paste a Spotify link / an \"Artist - Title\" "
+                     "list / CSV:", font=app.font_label).grid(
+            row=1, column=0, sticky="w", padx=12, pady=(10, 2))
 
-        self.input_box = ctk.CTkTextbox(tab, height=90, font=app.font_normal)
+        self.input_box = ctk.CTkTextbox(parent, height=70, font=app.font_normal)
         self.input_box.grid(row=2, column=0, sticky="ew", padx=12)
 
-        bar = ctk.CTkFrame(tab, fg_color="transparent")
+        bar = ctk.CTkFrame(parent, fg_color="transparent")
         bar.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 4))
-        bar.grid_columnconfigure(3, weight=1)
+        bar.grid_columnconfigure(2, weight=1)
         self.resolve_btn = ctk.CTkButton(bar, text="Resolve", width=110,
                                          font=app.font_normal, command=self._resolve_clicked)
         self.resolve_btn.grid(row=0, column=0)
-        self.liked_btn = ctk.CTkButton(bar, text="My Liked Songs", width=130,
-                                       font=app.font_normal, fg_color="transparent",
-                                       border_width=1, command=self._liked_clicked)
-        self.liked_btn.grid(row=0, column=1, padx=(8, 0))
         self.status_label = ctk.CTkLabel(bar, text="", font=app.font_small, anchor="w")
-        self.status_label.grid(row=0, column=3, sticky="ew", padx=(12, 0))
+        self.status_label.grid(row=0, column=2, sticky="ew", padx=(12, 0))
 
-        self.results = ctk.CTkScrollableFrame(tab, label_text="")
-        self.results.grid(row=4, column=0, sticky="nsew", padx=12, pady=(4, 4))
+        self.results = ctk.CTkScrollableFrame(parent, label_text="")
+        self.results.grid(row=5, column=0, sticky="nsew", padx=12, pady=(4, 4))
         self.results.grid_columnconfigure(0, weight=1)
 
-        foot = ctk.CTkFrame(tab, fg_color="transparent")
-        foot.grid(row=5, column=0, sticky="ew", padx=12, pady=(2, 10))
+        foot = ctk.CTkFrame(parent, fg_color="transparent")
+        foot.grid(row=6, column=0, sticky="ew", padx=12, pady=(2, 10))
         foot.grid_columnconfigure(1, weight=1)
         self.download_btn = ctk.CTkButton(foot, text="Download selected", height=38,
                                           font=app.font_label, state="disabled",
@@ -101,14 +162,58 @@ class _ImportUI:
         self.summary_label = ctk.CTkLabel(foot, text="", font=app.font_small, anchor="w")
         self.summary_label.grid(row=0, column=1, sticky="ew", padx=(12, 0))
 
-        self._build_imports_list(tab)
+        self._build_imports_list(parent)
+        self.refresh_my_playlists()
+
+    # -- your playlists --------------------------------------------------- #
+    def refresh_my_playlists(self):
+        for w in self.playlists_frame.winfo_children():
+            w.destroy()
+        client = get_spotify_client(self.app)
+        if not client.is_connected:
+            ctk.CTkLabel(self.playlists_frame,
+                         text="Connect Spotify in Settings -> Advanced -> Import from Spotify.",
+                         font=self.app.font_small, text_color="gray55").grid(
+                row=0, column=0, sticky="w")
+            return
+        ctk.CTkLabel(self.playlists_frame, text="Loading...", font=self.app.font_small,
+                     text_color="gray55").grid(row=0, column=0, sticky="w")
+        threading.Thread(target=self._load_my_playlists_worker, daemon=True).start()
+
+    def _load_my_playlists_worker(self):
+        app = self.app
+        try:
+            items = get_spotify_client(app).list_my_playlists()
+        except (SpotifyError, ValueError) as e:
+            msg = str(e)
+            return app.after(0, lambda: self._render_my_playlists([], msg))
+        except Exception as e:
+            msg = f"Couldn't load playlists: {e}"
+            return app.after(0, lambda: self._render_my_playlists([], msg))
+        app.after(0, lambda: self._render_my_playlists(items, None))
+
+    def _render_my_playlists(self, items, err):
+        for w in self.playlists_frame.winfo_children():
+            w.destroy()
+        if err:
+            ctk.CTkLabel(self.playlists_frame, text=err, font=self.app.font_small,
+                         text_color="#c0392b", wraplength=760, justify="left").grid(
+                row=0, column=0, sticky="w")
+            return
+        for i, pl in enumerate(items):
+            row = ctk.CTkFrame(self.playlists_frame)
+            row.grid(row=i, column=0, sticky="ew", pady=1)
+            row.grid_columnconfigure(0, weight=1)
+            n = pl.get("tracks_total")
+            sub = f"  ({n} tracks)" if isinstance(n, int) else ""
+            ctk.CTkLabel(row, text=pl["name"] + sub, font=self.app.font_small,
+                         anchor="w").grid(row=0, column=0, sticky="ew", padx=6)
+            ref = "liked" if pl["kind"] == "saved" else f"spotify:playlist:{pl['id']}"
+            ctk.CTkButton(row, text="Download", width=90, font=self.app.font_small,
+                          command=lambda r=ref: self.resolve_and_autoqueue(r)).grid(
+                row=0, column=1, padx=6, pady=3)
 
     # -- resolve ------------------------------------------------------- #
-    def _liked_clicked(self):
-        self.input_box.delete("1.0", "end")
-        self.input_box.insert("1.0", "liked")
-        self._resolve_clicked()
-
     def _resolve_clicked(self):
         text = self.input_box.get("1.0", "end").strip()
         if not text:
@@ -205,7 +310,7 @@ class _ImportUI:
                                     "Couldn't match any of those tracks on YouTube.")
             return
 
-        # Load just the unmatched/uncertain ones into this tab for a manual pass.
+        # Load just the unmatched/uncertain ones for a manual pass.
         self.session = music_import.ImportSession(
             source_text=session.source_text, kind=session.kind, name=session.name,
             spotify_id=session.spotify_id, snapshot_id=session.snapshot_id, tracks=review)
@@ -216,13 +321,13 @@ class _ImportUI:
             mt.selected = bool(mt.download_url)
             self._build_row(i, mt)
         self._refresh_summary()
-        self.app.tabview.set("Import")
+        if self.host is not None:
+            self.host.show()
         messagebox.showinfo(
             "Spotify import",
             f"{len(confident)} track(s) are downloading now.\n\n"
-            f"{len(review)} couldn't be matched confidently - they're listed on the "
-            f"Import tab; pick a result (or paste a YouTube URL) and hit "
-            f"\"Download selected\".")
+            f"{len(review)} couldn't be matched confidently - pick a result (or paste a "
+            f"YouTube URL) for each in this window, then hit \"Download selected\".")
 
     # -- render the resolved list ------------------------------------ #
     def _show_session(self, session):
@@ -331,12 +436,12 @@ class _ImportUI:
         self.app._start_music_import_download(self.session, picked, urls, tag_map)
 
     # -- saved imports list ---------------------------------------- #
-    def _build_imports_list(self, tab):
-        wrap = ctk.CTkFrame(tab, fg_color="transparent")
-        wrap.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 10))
+    def _build_imports_list(self, parent):
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.grid(row=7, column=0, sticky="ew", padx=12, pady=(0, 10))
         wrap.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(wrap, text="Previous imports", font=self.app.font_label).grid(
-            row=0, column=0, sticky="w")
+        ctk.CTkLabel(wrap, text="Previous imports (re-sync a playlist to get new tracks)",
+                     font=self.app.font_label).grid(row=0, column=0, sticky="w")
         self.imports_frame = ctk.CTkFrame(wrap, fg_color="transparent")
         self.imports_frame.grid(row=1, column=0, sticky="ew")
         self.imports_frame.grid_columnconfigure(0, weight=1)
@@ -428,8 +533,8 @@ def try_handle_download_spotify(app, lines):
     Returns:
       "not_spotify" - no Spotify links; caller proceeds normally.
       "handled"     - every line was a Spotify link; this took over
-                      (resolve -> queue confident matches -> Import tab for the
-                      rest). Caller must stop.
+                      (resolve -> queue confident matches; if some need a
+                      manual pick the Spotify window opens). Caller must stop.
       "mixed"       - Spotify links AND other URLs together; caller should show
                       the returned message and stop.
     """
@@ -443,18 +548,14 @@ def try_handle_download_spotify(app, lines):
         messagebox.showinfo(
             "Spotify link",
             "Mixing a Spotify link with other URLs in one go isn't supported.\n\n"
-            "Put the Spotify link in on its own, or use the Import tab.")
-        return "mixed"
-    ui = getattr(app, "_music_import_ui", None)
-    if ui is None:
-        messagebox.showinfo("Spotify link", "Open the Import tab once, then try again.")
+            'Put the Spotify link in on its own, or use "Import from Spotify".')
         return "mixed"
     if len(spotify) > 1:
         messagebox.showinfo(
             "Spotify links",
-            "One Spotify link at a time here - use the Import tab to queue several.")
+            'One Spotify link at a time here - use "Import from Spotify" to queue several.')
         return "mixed"
-    ui.resolve_and_autoqueue(spotify[0])
+    _get_import_ui(app).resolve_and_autoqueue(spotify[0])
     return "handled"
 
 
