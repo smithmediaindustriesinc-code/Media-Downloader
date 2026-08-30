@@ -633,6 +633,12 @@ class App(*_APP_BASES):
         self._last_mini_log_text = ""
         self._last_mini_log_color = "gray60"
 
+        # "Current Download: <name>   --- Queue item x/x ---" line, right under
+        # the mini log - issue #21. Blank when nothing is downloading.
+        self.current_download_label = ctk.CTkLabel(header, text="", font=self.font_small,
+                                                   text_color="gray50", anchor="w")
+        self.current_download_label.grid(row=3, column=0, sticky="w", pady=(0, 0))
+
         # Save status - always visible (not gated to non-Download tabs
         # like the log echo above it), right below it under the title.
         # Turns to "Not saved" the INSTANT a tracked field actually
@@ -2114,6 +2120,7 @@ class App(*_APP_BASES):
 
         self.downloader = Downloader(progress_callback=self._threadsafe_progress, log_callback=self._threadsafe_log,
                                           ping_ms_provider=lambda: self._network_ping)
+        self._set_current_download(unique_name, "")
         status, path, error_msg, was_cancelled = "Success", "", None, False
         update_entry(history_entry_id, status="In Progress")
         self.after(0, self._refresh_history_tab)
@@ -2141,6 +2148,7 @@ class App(*_APP_BASES):
             self.last_downloaded_path = path
             update_item(request_id, url, status="success", path=path,
                         elapsed_seconds=self.downloader.elapsed_seconds())
+            self._notify_download_done(f"Downloaded \"{unique_name}\".")
         except DownloadCancelled:
             self._threadsafe_log("Download cancelled.")
             status = "Cancelled"
@@ -2661,6 +2669,7 @@ class App(*_APP_BASES):
                 unique_name = make_unique_name(out_dir, name, ext)
                 update_item(request_id, url, name=unique_name)
                 update_entry(history_entry_id, name=unique_name)
+                self._set_current_download(unique_name, f"Queue item {i}/{total}")
                 self.after(0, self._refresh_history_tab)
 
                 if self.cfg.get("duplicate_detection_enabled", True):
@@ -2768,6 +2777,8 @@ class App(*_APP_BASES):
             self._threadsafe_log(f"Batch queue stopped on an unexpected error: {e}", color="red")
         else:
             self._threadsafe_log("Batch queue finished.", color="green")
+            if not self._cancel_requested:
+                self._notify_download_done(f"Queue finished - {total} item(s).")
         finally:
             self.batch_running = False
             self._batch_current_url = None
@@ -2780,6 +2791,49 @@ class App(*_APP_BASES):
             self.after(0, self._refresh_requests_tab)
 
     # ------------------------------------------------------------------ #
+    def _set_current_download(self, name="", pos=""):
+        """The 'Current Download: ...   --- Queue item x/x ---' header line."""
+        if not hasattr(self, "current_download_label"):
+            return
+        if not name:
+            text = ""
+        else:
+            text = f"Current Download: \"{name}\""
+            if pos:
+                text += f"   --- {pos} ---"
+        self.after(0, lambda: self.current_download_label.configure(text=text))
+
+    def _notify_download_done(self, summary):
+        """Issue #21 - optional heads-up when a download / queue finishes and
+        the window isn't in front. Flashes the taskbar + (optionally) a beep;
+        no external dependency."""
+        if not self.cfg.get("notify_on_download_complete", False):
+            return
+        try:
+            if self.focus_displayof() is not None:
+                return  # already looking at it
+        except Exception:
+            pass
+        try:
+            import ctypes
+            FLASHW_ALL, FLASHW_TIMERNOFG = 0x3, 0xC
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p),
+                            ("dwFlags", ctypes.c_uint), ("uCount", ctypes.c_uint),
+                            ("dwTimeout", ctypes.c_uint)]
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd or self.winfo_id(),
+                              FLASHW_ALL | FLASHW_TIMERNOFG, 5, 0)
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+        except Exception:
+            pass
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except Exception:
+            pass
+        self._threadsafe_log(f"[done] {summary}", color="green")
+
     def _set_downloading_state(self, downloading, batch=False):
         state = "disabled" if downloading else "normal"
         self.download_btn.configure(state=state)
@@ -2794,6 +2848,7 @@ class App(*_APP_BASES):
             self.progress_label.configure(text="Idle")
             self.queue_progress_label.configure(text="")
             self.eta_label.configure(text="")
+            self._set_current_download("")
             self._batch_item_durations = []
             self._batch_items_remaining = 0
             self._reset_batch_size_state()
@@ -4037,6 +4092,16 @@ class App(*_APP_BASES):
         # ACCESSIBILITY
         # ============================================================ #
         self._section_header(scroll, "Accessibility")
+
+        self.notify_done_var = ctk.BooleanVar(
+            value=self.cfg.get("notify_on_download_complete", False))
+        ctk.CTkSwitch(scroll, text="Notify when a download or queue finishes "
+                      "(flashes the taskbar + a beep when the window isn't in front)",
+                      font=self.font_normal, variable=self.notify_done_var,
+                      command=lambda: (self.cfg.__setitem__(
+                          "notify_on_download_complete", self.notify_done_var.get()),
+                          save_config(self.cfg))).pack(anchor="w", padx=5, pady=(0, 12))
+
         scroll_speed_header_row = ctk.CTkFrame(scroll, fg_color="transparent")
         scroll_speed_header_row.pack(anchor="w", fill="x")
         self._sub_header(scroll_speed_header_row, "Scroll Speed", pack_side="left")

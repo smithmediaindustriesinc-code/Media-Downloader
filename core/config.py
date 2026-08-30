@@ -156,6 +156,9 @@ DEFAULT_CONFIG = {
     "music_embed_lyrics": True,     # fetch + embed lyrics (syncedlyrics).
     "music_tag_source_comment": True,  # write a comment tag noting the audio
                             # is a YouTube match, not the original master.
+    "notify_on_download_complete": False,  # Accessibility - flash the taskbar
+                            # (+ a beep) when a download / queue finishes and
+                            # the window isn't in front. Issue #21.
     "media_player_path": "",  # "" / "system" = open files with the OS default
                             # app. Otherwise the path to a media-player .exe
                             # (VLC, MPC-HC, PotPlayer, ...) that the "Open file"
