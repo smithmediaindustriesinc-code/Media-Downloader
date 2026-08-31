@@ -317,6 +317,8 @@ class App(*_APP_BASES):
             self.update_idletasks()
             self._apply_launch_geometry()
             self.lift()
+            if self._geometry_finalized == 1 and self.cfg.get("background_color"):
+                self._reshade_frames(self.cfg["background_color"])  # #T1
         except Exception as e:
             log_error("finalize_launch_geometry", e)
         if self._geometry_finalized < 2:
@@ -4439,6 +4441,7 @@ class App(*_APP_BASES):
             self.cfg["background_color"] = hex_color
             self._bg_color_preview.configure(fg_color=hex_color)
             self.configure(fg_color=hex_color)
+            self._reshade_frames(hex_color)
             save_config(self.cfg)
 
     def _reset_background_color(self):
@@ -4446,7 +4449,77 @@ class App(*_APP_BASES):
         default = self._default_bg_color()
         self._bg_color_preview.configure(fg_color=default)
         self.configure(fg_color=default)
+        self._reshade_frames(None)
         save_config(self.cfg)
+
+    # ---- #T1: derive CTkFrame shades from the chosen background color -------
+    @staticmethod
+    def _hex_to_rgb(h):
+        h = h.lstrip("#")
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+    @staticmethod
+    def _rgb_to_hex(rgb):
+        return "#%02x%02x%02x" % tuple(max(0, min(255, int(round(c)))) for c in rgb)
+
+    def _shade_for(self, base_hex, step):
+        """Return the fg_color a frame `step` layers deep should use so the
+        window tint carries through every CTkFrame with the SAME contrast ratio
+        CustomTkinter's default gray ladder uses (gray92/86/81 in light themes,
+        gray14/17/20 in dark). Light bg -> frames step darker; dark bg -> frames
+        step lighter."""
+        r, g, b = self._hex_to_rgb(base_hex)
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        if lum < 128:                      # dark background -> lighten frames
+            target, per = (255, 255, 255), 0.055
+        else:                              # light background -> darken frames
+            target, per = (0, 0, 0), 0.06
+        t = per * step
+        return self._rgb_to_hex(tuple(c + (tc - c) * t for c, tc in zip((r, g, b), target)))
+
+    def _reshade_frames(self, base_hex):
+        """Recolour every CTkFrame that is still using a default theme gray (or
+        that we previously reshaded) so it picks up the custom background tint.
+        Passing base_hex=None restores the theme defaults."""
+        try:
+            import customtkinter as _ctk
+            th = _ctk.ThemeManager.theme.get("CTkFrame", {})
+            default_fg = th.get("fg_color", ["gray86", "gray17"])
+            default_top = th.get("top_fg_color", ["gray92", "gray14"])
+            defaults = set()
+            for c in (default_fg, default_top):
+                defaults.add(tuple(c) if isinstance(c, (list, tuple)) else c)
+
+            if base_hex:
+                layer = {0: self._shade_for(base_hex, 1),
+                         1: self._shade_for(base_hex, 2),
+                         2: self._shade_for(base_hex, 3)}
+
+            def restore_val():
+                return tuple(default_fg) if isinstance(default_fg, (list, tuple)) else default_fg
+
+            def walk(widget, depth):
+                for child in widget.winfo_children():
+                    is_frame = isinstance(child, (_ctk.CTkFrame, _ctk.CTkScrollableFrame))
+                    if is_frame:
+                        try:
+                            cur = child.cget("fg_color")
+                            curn = tuple(cur) if isinstance(cur, (list, tuple)) else cur
+                            if curn != "transparent" and (
+                                    getattr(child, "_t1_shaded", False) or curn in defaults):
+                                if base_hex:
+                                    child.configure(fg_color=layer.get(min(depth, 2)))
+                                    child._t1_shaded = True
+                                elif getattr(child, "_t1_shaded", False):
+                                    child.configure(fg_color=restore_val())
+                                    child._t1_shaded = False
+                        except Exception:
+                            pass
+                    walk(child, depth + 1 if is_frame else depth)
+
+            walk(self, 0)
+        except Exception as e:
+            log_error("reshade_frames", e)
 
     def _on_log_height_slide(self, value):
         height = int(value)
