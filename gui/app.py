@@ -1389,7 +1389,7 @@ class App(*_APP_BASES):
         hint = ctk.CTkLabel(parent, text="?", font=ctk.CTkFont(size=11, weight="bold"),
                              width=18, height=18, corner_radius=9, fg_color=("gray75", "gray30"),
                              text_color=("gray20", "gray85"), cursor="hand2")
-        tip = {"win": None}
+        tip = {"win": None, "sticky": False}
 
         def open_tip():
             if tip["win"] is not None:
@@ -1411,20 +1411,70 @@ class App(*_APP_BASES):
             # not just the common case of leaving the icon directly.
             win.bind("<Leave>", lambda e: close_tip())
             tip["win"] = win
+            self._watch_tip(hint, tip, close_tip)
 
         def close_tip():
             if tip["win"] is not None:
                 tip["win"].destroy()
                 tip["win"] = None
+            tip["sticky"] = False
 
         def toggle_tip(_event=None):
-            close_tip() if tip["win"] is not None else open_tip()
+            if tip["win"] is not None:
+                close_tip()
+            else:
+                tip["sticky"] = True
+                open_tip()
 
         hint.bind("<Enter>", lambda e: open_tip())
         hint.bind("<Leave>", lambda e: close_tip())
         hint.bind("<Button-1>", toggle_tip)
         hint._hint_test_hooks = (open_tip, close_tip, toggle_tip, tip)  # exposed purely for direct testing
         return hint
+
+    def _watch_tip(self, anchor, tip, close_fn):
+        """#T2 tooltip watchdog. Once a hint/tooltip popup is on screen, re-check
+        every 500ms that it should still be showing and kill it otherwise. Fixes
+        popups that hang on screen indefinitely when the <Leave> event never
+        arrives - tab switched away, window defocused, the pointer crossed a gap
+        between the icon and the popup too fast, or the anchor widget went away.
+        A click-toggled hint (tip['sticky']) is only killed once its anchor is
+        gone or unmapped, not merely because the pointer moved off it."""
+        def tick():
+            win = tip.get("win")
+            if win is None:
+                return
+            alive = True
+            try:
+                if (not anchor.winfo_exists() or not win.winfo_exists()
+                        or not anchor.winfo_ismapped()):
+                    alive = False
+                elif not tip.get("sticky"):
+                    over = anchor.winfo_containing(anchor.winfo_pointerx(),
+                                                  anchor.winfo_pointery())
+                    ok = over is anchor
+                    p = over
+                    while p is not None and not ok:
+                        if p is win:
+                            ok = True
+                        p = getattr(p, "master", None)
+                    alive = ok
+            except Exception:
+                alive = False
+            if not alive:
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+                return
+            try:
+                anchor.after(500, tick)
+            except Exception:
+                pass
+        try:
+            anchor.after(500, tick)
+        except Exception:
+            pass
 
     def _add_tooltip(self, widget, text):
         """A minimal hover tooltip - just enough to show a full name when
@@ -1443,6 +1493,7 @@ class App(*_APP_BASES):
             ctk.CTkLabel(win, text=text, font=self.font_small, fg_color=("gray85", "gray20"),
                         corner_radius=4, padx=8, pady=4).pack()
             tip["win"] = win
+            self._watch_tip(widget, tip, hide)
 
         def hide(_event=None):
             if tip["win"] is not None:
