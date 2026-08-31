@@ -4709,10 +4709,20 @@ class App(*_APP_BASES):
         tab.grid_columnconfigure(0, weight=1)
 
         from core.app_info import APP_VERSION, APP_RELEASE_DATE, APP_PUBLISHER
+        try:
+            from core.app_info import APP_IS_PRERELEASE
+        except Exception:
+            APP_IS_PRERELEASE = False
         header = ctk.CTkFrame(tab)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        ctk.CTkLabel(header, text="Media Downloader", font=self.font_label).pack(anchor="w", padx=15, pady=(10, 2))
-        info_line = f"Version {APP_VERSION}  -  Released {APP_RELEASE_DATE}  -  {APP_PUBLISHER}"
+        title_line = ctk.CTkFrame(header, fg_color="transparent")
+        title_line.pack(anchor="w", padx=15, pady=(10, 2), fill="x")
+        ctk.CTkLabel(title_line, text="Media Downloader", font=self.font_label).pack(side="left")
+        if APP_IS_PRERELEASE:
+            ctk.CTkLabel(title_line, text="  PRE-RELEASE (beta)", font=self.font_small,
+                         text_color="#d68910").pack(side="left", padx=(6, 0))
+        ver_txt = f"{APP_VERSION}-beta" if APP_IS_PRERELEASE else APP_VERSION
+        info_line = f"Version {ver_txt}  -  Released {APP_RELEASE_DATE}  -  {APP_PUBLISHER}"
         ctk.CTkLabel(header, text=info_line, font=self.font_small, text_color="gray60").pack(
             anchor="w", padx=15, pady=(0, 10))
 

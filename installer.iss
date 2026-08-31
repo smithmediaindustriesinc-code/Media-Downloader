@@ -41,7 +41,7 @@
   #define OutBase "MediaDownloaderSetup-beta"
 #endif
 
-#define MyAppVersion "1.7.2"
+#define MyAppVersion "1.7.3"
 #define MyAppPublisher "Smith Media Industries inc."
 #define MyAppExeName "MediaDownloader.exe"
 #define MyDistFolder "MediaDownloader"

@@ -106,6 +106,42 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.7.3
+
+Spotify search, transport controls, a rebuilt page scraper, and a batch of
+UI fixes.
+
+- **Search Spotify** from the import window - songs *and* playlists, on the
+  left; "Your Spotify playlists" on the right. One Search button so it isn't
+  firing a request per keystroke. *(#S1)*
+- **Multiple Spotify links at once** - paste several into Single/Batch or the
+  import box. Each is resolved, the tracks pooled and de-duped, confident
+  matches queue straight away, the rest open for a manual pick. *(#S4)*
+- **Spotify-made playlists** (Discover Weekly, Daily Mix, "Made For You")
+  now give a clear explanation instead of a raw 403 - Spotify blocks those
+  for third-party apps. Your own / followed / public playlists still work.
+- **Pause / Continue / Stop / Restart** - the single Cancel button is now
+  four small icon buttons. Pause halts the transfer in place (connection and
+  `.part` kept); Restart relaunches the same job from the top. *(#D2)*
+- **Page scraper rebuilt** - "Scrape page for videos" (a button on the
+  Download tab, opens its own window) now uses yt-dlp's generic extractor:
+  it finds the real embedded videos a person would watch (players, `<video>`
+  tags, YouTube/Vimeo iframes) with titles and durations, and skips ad blips.
+  The bundled ~300 MB browser component is gone. *(#U1/#U2)*
+- **Central error log** at `%APPDATA%\Media Downloader\error_log.txt`.
+- **Custom background colour** now tints every panel to match. *(#T1)*
+- **Scroll speed** is Slow / Medium / Fast. *(#T6)*
+- **Playlists tab:** "Open folder" → "Open location", plus a new **Play
+  playlist** button. *(#P1)*
+- Spotify downloads land in the **Music** folder, not Video. *(#4)*
+- URL + name fields **clear automatically** after a download (it's in
+  History). *(#8)*
+- Hint pop-ups no longer hang on screen - a watchdog closes them once the
+  pointer leaves or the tab changes. *(#T2)*
+- Fixes: window spawning top-left at the wrong size; the "Up to date" label
+  overlapping the current-download line; the frozen build crashing in
+  Settings (`spotify_client`).
+
 ### 1.7.2
 
 Spotify polish + a round of bug fixes (GitHub issues).
