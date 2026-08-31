@@ -513,6 +513,9 @@ class Downloader:
         self.progress_callback = progress_callback
         self.log_callback = log_callback
         self._cancel = False
+        self._paused = False   # #D2: cooperative pause - the progress hook blocks
+        #                        while this is set, keeping the connection + .part
+        #                        file alive so the transfer resumes in place.
         self.item_start_time = None    # set when a single URL's download begins
         self.last_speed = None         # bytes/sec, from the most recent hook call (raw, unsmoothed)
         self.last_eta_seconds = None
@@ -534,6 +537,13 @@ class Downloader:
 
     def cancel(self):
         self._cancel = True
+        self._paused = False
+
+    def pause(self):
+        self._paused = True
+
+    def resume(self):
+        self._paused = False
 
     def _log(self, msg):
         if self.log_callback:
@@ -551,6 +561,15 @@ class Downloader:
         return self._item_prev_streams_bytes + (self.last_downloaded_bytes or 0)
 
     def _hook(self, d):
+        if self._cancel:
+            raise DownloadCancelled("Download cancelled by user.")
+        # #D2 pause: block here (on yt-dlp's own download thread) while paused.
+        # This halts the transfer mid-stream without tearing anything down, so
+        # Continue picks up exactly where it left off. If the pause outlasts the
+        # server's idle timeout the next read fails and the retry wrapper takes
+        # over from the .part file instead.
+        while self._paused and not self._cancel:
+            time.sleep(0.2)
         if self._cancel:
             raise DownloadCancelled("Download cancelled by user.")
         if d.get("status") == "downloading":

@@ -876,10 +876,40 @@ class App(*_APP_BASES):
 
         action_row = ctk.CTkFrame(outer, fg_color="transparent")
         action_row.grid(row=4, column=0, sticky="ew", pady=(6, 0))
-        self.cancel_btn = ctk.CTkButton(action_row, text="Cancel current download", font=self.font_normal,
-                                         height=32, fg_color="#a13333", hover_color="#7d2626", state="disabled",
-                                         command=self.cancel_download)
-        self.cancel_btn.pack(side="left")
+
+        # --- transport controls (#D2): pause / continue / stop / restart ------
+        # Four small square buttons, each with its own icon, all disabled unless
+        # a download is actually running. Continue is additionally gated on the
+        # download being paused.
+        self._paused = False
+        self._download_active = False
+        ctl = ctk.CTkFrame(action_row, fg_color="transparent")
+        ctl.pack(side="left")
+        _b = dict(width=32, height=32, text="", corner_radius=6, state="disabled")
+        self.pause_btn = ctk.CTkButton(ctl, image=self._ctl_icon("ctl_pause"),
+                                       fg_color="gray40", hover_color="gray30",
+                                       command=self._pause_download, **_b)
+        self.pause_btn.pack(side="left")
+        self.continue_btn = ctk.CTkButton(ctl, image=self._ctl_icon("ctl_play"),
+                                          fg_color="#2fa84f", hover_color="#248a40",
+                                          command=self._continue_download, **_b)
+        self.continue_btn.pack(side="left", padx=(6, 0))
+        self.stop_btn = ctk.CTkButton(ctl, image=self._ctl_icon("ctl_stop"),
+                                      fg_color="#a13333", hover_color="#7d2626",
+                                      command=self.cancel_download, **_b)
+        self.stop_btn.pack(side="left", padx=(6, 0))
+        self.restart_btn = ctk.CTkButton(ctl, image=self._ctl_icon("ctl_restart"),
+                                         fg_color="#3b8ed0", hover_color="#2f72a8",
+                                         command=self._restart_download, **_b)
+        self.restart_btn.pack(side="left", padx=(6, 0))
+        # Back-compat: existing code still does self.cancel_btn.configure(state=...)
+        self.cancel_btn = self.stop_btn
+        for _txt, _btn in (("Pause download", self.pause_btn),
+                           ("Resume download", self.continue_btn),
+                           ("Stop download", self.stop_btn),
+                           ("Restart from the beginning", self.restart_btn)):
+            self._add_tooltip(_btn, _txt)
+
         ctk.CTkButton(action_row, text="Clear log", font=self.font_normal, height=32,
                       fg_color="gray40", hover_color="gray30",
                       command=self.clear_log).pack(side="left", padx=(10, 0))
@@ -1680,6 +1710,24 @@ class App(*_APP_BASES):
         except Exception:
             pass
 
+    def _ctl_icon(self, name):
+        """Small white transport-control glyph (assets/<name>.png) for the
+        Download-tab pause/continue/stop/restart buttons (#D2). Cached; a hard
+        ref is kept alive per the CTkImage note above."""
+        cache = getattr(self, "_ctl_icon_cache", None)
+        if cache is None:
+            cache = self._ctl_icon_cache = {}
+        if name not in cache:
+            try:
+                img = ctk.CTkImage(Image.open(resource_path(f"assets/{name}.png")), size=(15, 15))
+                self._kept_images.append(img) if hasattr(self, "_kept_images") \
+                    else setattr(self, "_kept_images", [img])
+                cache[name] = img
+            except Exception as e:
+                log_error("ctl_icon", e)
+                cache[name] = None
+        return cache[name]
+
     def _section_header(self, parent, text):
         """A section header styled to actually read as a distinct block -
         not just bold text sitting in a long list, which is what these
@@ -2077,6 +2125,7 @@ class App(*_APP_BASES):
         self.last_output_dir = out_dir
 
         self._set_downloading_state(True)
+        self._last_run_spec = ("single", (dtype, url, name, out_dir))  # #D2 Restart
         threading.Thread(target=self._run_single, args=(dtype, url, name, out_dir), daemon=True).start()
 
     def _handle_bot_detection(self, request_id, url):
@@ -2696,6 +2745,7 @@ class App(*_APP_BASES):
             # per how this was specifically asked for.
             self._batch_undo_stack = []
             self._refresh_batch_dynamic_list()
+        self._last_run_spec = ("batch", (list(urls), out_dir, custom_name))  # #D2 Restart
         threading.Thread(target=self._run_batch, args=(urls, out_dir, custom_name), daemon=True).start()
 
     def _run_batch(self, urls, out_dir, custom_name=None):
@@ -2943,12 +2993,16 @@ class App(*_APP_BASES):
         state = "disabled" if downloading else "normal"
         self.download_btn.configure(state=state)
         self.batch_btn.configure(state=state)
-        self.cancel_btn.configure(state="normal" if downloading else "disabled")
+        self._download_active = bool(downloading)
         if downloading:
+            self._paused = False
             self._cancel_requested = False  # fresh run - clear any earlier Cancel
             self._start_speed_display_tick()
         else:
+            self._paused = False
             self._stop_speed_display_tick()
+        self._sync_transport_buttons()
+        if not downloading:
             self.progress_bar.set(0)
             self.progress_label.configure(text="Idle")
             self.queue_progress_label.configure(text="")
@@ -2966,10 +3020,81 @@ class App(*_APP_BASES):
         prefetch_cancel = getattr(self, "_prefetch_cancel", None)
         if prefetch_cancel is not None:
             prefetch_cancel.set()  # abort a batch size pre-fetch pass, if one is running
+        self._paused = False
         if self.downloader:
             self.downloader.cancel()
         self._threadsafe_log("Cancelling...", color="red")
         self.cancel_btn.configure(state="disabled")
+
+    # ---- #D2 transport controls ----------------------------------------
+    def _sync_transport_buttons(self):
+        active = getattr(self, "_download_active", False)
+        paused = getattr(self, "_paused", False)
+        for btn, on in ((getattr(self, "pause_btn", None), active and not paused),
+                        (getattr(self, "continue_btn", None), active and paused),
+                        (getattr(self, "stop_btn", None), active),
+                        (getattr(self, "restart_btn", None), active)):
+            if btn is not None:
+                try:
+                    btn.configure(state="normal" if on else "disabled")
+                except Exception:
+                    pass
+
+    def _pause_download(self):
+        if not getattr(self, "_download_active", False):
+            return
+        self._paused = True
+        if self.downloader:
+            self.downloader.pause()
+        self._threadsafe_log("Download paused.", color="blue")
+        try:
+            self.progress_label.configure(text="Paused")
+        except Exception:
+            pass
+        self._sync_transport_buttons()
+
+    def _continue_download(self):
+        self._paused = False
+        if self.downloader:
+            self.downloader.resume()
+        self._threadsafe_log("Download resumed.", color="blue")
+        self._sync_transport_buttons()
+
+    def _restart_download(self):
+        """Stop whatever's running and relaunch the exact same job from the
+        top (#D2). Works for both a single download and a queue."""
+        spec = getattr(self, "_last_run_spec", None)
+        self._paused = False
+        if self.downloader:
+            try:
+                self.downloader.resume()
+            except Exception:
+                pass
+        self.cancel_download()
+        if not spec:
+            return
+        self._threadsafe_log("Restarting from the beginning...", color="blue")
+
+        def _relaunch(tries=0):
+            busy = getattr(self, "batch_running", False) or self._single_download_busy()
+            if busy and tries < 80:
+                self.after(250, lambda: _relaunch(tries + 1))
+                return
+            kind, payload = spec
+            self._cancel_requested = False
+            if kind == "batch":
+                urls, out_dir, custom_name = payload
+                self.batch_running = True
+                self._set_downloading_state(True, batch=True)
+                threading.Thread(target=self._run_batch, args=(urls, out_dir, custom_name),
+                                 daemon=True).start()
+            else:
+                dtype, url, name, out_dir = payload
+                self._set_downloading_state(True)
+                threading.Thread(target=self._run_single, args=(dtype, url, name, out_dir),
+                                 daemon=True).start()
+
+        self.after(300, _relaunch)
 
     def _threadsafe_log(self, message, level="simple", color=None):
         self.after(0, lambda: self._log(message, level=level, color=color))
