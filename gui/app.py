@@ -1724,6 +1724,12 @@ class App(*_APP_BASES):
             return
         try:
             icon_img = ctk.CTkImage(Image.open(resource_path(icon_rel_path)), size=TAB_ICON_SIZE)
+            # Keep a hard ref alive - a GC'd CTkImage can make a *later*
+            # configure() with a new image raise "image doesn't exist" (M4).
+            if hasattr(self, "_kept_images"):
+                self._kept_images.append(icon_img)
+            else:
+                self._kept_images = [icon_img]
             self.tabview.buttons_dict[tab_name].configure(image=icon_img, compound="left")
         except Exception:
             pass
@@ -2374,6 +2380,11 @@ class App(*_APP_BASES):
         self.after(0, self._refresh_playlists_tab)
 
         entry_urls = [e["url"] for e in info["entries"]] or [url]
+        entry_titles = {e["url"]: e.get("title") for e in info["entries"]}
+        if info.get("partial"):
+            self._threadsafe_log(
+                f"Heads up: the playlist lookup didn't fully finish - only the first "
+                f"{len(entry_urls)} item(s) were read and will be downloaded.", color="red")
         request_id = start_request(dtype, "playlist", entry_urls, out_dir=playlist_out_dir)
 
         delay_s = max(0, self.cfg.get("batch_delay_seconds", 0))
@@ -2408,12 +2419,21 @@ class App(*_APP_BASES):
                                           ping_ms_provider=lambda: self._network_ping)
             history_entry_id = add_entry(entry_url, entry_url, dtype, "", "Analyzing")
             self.after(0, self._refresh_history_tab)
+            # O4: the playlist enumeration already gave us each entry's title.
+            # Only pay for a second full metadata fetch when format selection
+            # genuinely needs the format list (a video download with a specific
+            # aspect ratio); audio and "Any" aspect don't.
             entry_media_info = None
-            try:
-                entry_media_info = fetch_media_info(entry_url)
-                entry_name = sanitize_filename(beautify_title(entry_media_info.get("title", f"item_{i}")))
-            except Exception:
-                entry_name = f"item_{i}"
+            flat_title = entry_titles.get(entry_url)
+            need_full = (dtype == "Video"
+                         and self.aspect_var.get() not in ("Any", "", None))
+            if need_full:
+                try:
+                    entry_media_info = fetch_media_info(entry_url)
+                    flat_title = entry_media_info.get("title") or flat_title
+                except Exception:
+                    pass
+            entry_name = sanitize_filename(beautify_title(flat_title or f"item_{i}"))
             ext = self.cfg["video_format"] if dtype == "Video" else self.cfg["audio_format"]
             unique_name = make_unique_name(playlist_out_dir, entry_name, ext)
             update_item(request_id, entry_url, name=unique_name)
@@ -3985,8 +4005,6 @@ class App(*_APP_BASES):
     def _do_refresh_history_tab(self):
         if getattr(self, "_closing", False):
             return
-        for w in self.history_frame.winfo_children():
-            w.destroy()
         all_history = load_history()
         entries = list(all_history)
 
@@ -4044,6 +4062,22 @@ class App(*_APP_BASES):
         # with a search active, the relevance-ranked order from above -
         # left as-is rather than re-sorted by date, since "best match
         # first" is what a search result list should show)
+
+        # O2: the download workers fire this every ~250ms during a batch, but
+        # the visible data usually hasn't changed between ticks. Signature the
+        # final render inputs and skip the full teardown/rebuild if identical.
+        sel_ids = (tuple(sorted(self.history_selector.selected_ids()))
+                   if self.history_selector.enabled else ())
+        sig = (query, type_choice, sort_choice, self.history_selector.enabled, sel_ids,
+               tuple((e.get("id"), e.get("status"), e.get("name"), e.get("path"),
+                      e.get("date")) for e in entries))
+        if (sig == getattr(self, "_history_render_sig", None)
+                and self.history_frame.winfo_children()):
+            return
+        self._history_render_sig = sig
+
+        for w in self.history_frame.winfo_children():
+            w.destroy()
 
         if not entries:
             msg = "No downloads yet." if not all_history else "No downloads match your search/filter."
@@ -4505,7 +4539,7 @@ class App(*_APP_BASES):
 
         try:
             from core.config import export_config_dict
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(export_config_dict(export_cfg), f, indent=4)
             self._set_inline_status(self.settings_io_status_label, f"Settings exported to {path}", "success")
         except Exception as e:
@@ -4516,7 +4550,7 @@ class App(*_APP_BASES):
         if not path:
             return
         try:
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 imported = json.load(f)
         except Exception as e:
             messagebox.showerror("Import failed", f"Couldn't read that file: {e}")
@@ -4633,6 +4667,9 @@ class App(*_APP_BASES):
         """Recolour every CTkFrame that is still using a default theme gray (or
         that we previously reshaded) so it picks up the custom background tint.
         Passing base_hex=None restores the theme defaults."""
+        if base_hex == getattr(self, "_reshaded_for", "__unset__"):
+            return  # O3: nothing changed, skip the whole-tree walk
+        self._reshaded_for = base_hex
         try:
             import customtkinter as _ctk
             th = _ctk.ThemeManager.theme.get("CTkFrame", {})
@@ -5424,6 +5461,11 @@ class App(*_APP_BASES):
             save_config(self.cfg)
         except Exception:
             pass  # never let saving the size/position block the app from closing
+        try:
+            from core.history import flush_history
+            flush_history()  # make sure the daemon starts from current history
+        except Exception:
+            pass
         self._maybe_spawn_background_daemon()
         mark("WM_DELETE_WINDOW: user closed the window normally")
         self.destroy()
@@ -5531,6 +5573,11 @@ class App(*_APP_BASES):
         self._us_btn = ctk.CTkButton(input_row, text="Scan", font=self.font_normal, width=90,
                                      command=self._us_start)
         self._us_btn.grid(row=0, column=3)
+        self._us_stop_btn = ctk.CTkButton(input_row, text="Stop", font=self.font_normal, width=70,
+                                          fg_color="#a13333", hover_color="#7d2626", state="disabled",
+                                          command=self._us_stop)
+        self._us_stop_btn.grid(row=0, column=4, padx=(6, 0))
+        self._us_scan_gen = 0
 
         foot = ctk.CTkFrame(win, fg_color="transparent")
         foot.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 6))
@@ -5551,31 +5598,48 @@ class App(*_APP_BASES):
         if not url:
             messagebox.showwarning("Scrape a page", "Enter a URL first.", parent=self._us_win)
             return
+        self._us_scan_gen += 1
         self._us_btn.configure(state="disabled", text="Scanning...")
+        self._us_stop_btn.configure(state="normal")
         self._us_queue_all_btn.configure(state="disabled")
         self._us_status.configure(text="Scanning the page (this can take a few seconds)...",
                                   text_color="gray60")
         media_type = {"Both": "both", "Video": "video", "Audio": "audio"}.get(
             self._us_type_var.get(), "both")
-        threading.Thread(target=self._us_run, args=(url, media_type), daemon=True).start()
+        threading.Thread(target=self._us_run, args=(url, media_type, self._us_scan_gen),
+                         daemon=True).start()
 
-    def _us_run(self, url, media_type):
+    def _us_stop(self):
+        # Can't truly interrupt yt-dlp mid-extract, but bump the generation so
+        # the in-flight result is ignored when it arrives, and give the UI back.
+        self._us_scan_gen += 1
+        self._us_btn.configure(state="normal", text="Scan")
+        self._us_stop_btn.configure(state="disabled")
+        self._us_status.configure(text="Stopped.", text_color="gray60")
+
+    def _us_run(self, url, media_type, gen):
         from core.url_scraper import scrape_media_urls
 
         def log(msg):
-            self.after(0, lambda: self._us_status.configure(text=msg, text_color="gray60"))
+            if gen == self._us_scan_gen:
+                self.after(0, lambda: self._us_status.configure(text=msg, text_color="gray60"))
 
         try:
             results = scrape_media_urls(url, media_type=media_type, log_callback=log)
         except Exception as e:
             msg = str(e)
-            self.after(0, lambda: messagebox.showerror("Scan failed", msg, parent=self._us_win))
-            self.after(0, lambda: self._us_btn.configure(state="normal", text="Scan"))
+            if gen == self._us_scan_gen:
+                self.after(0, lambda: messagebox.showerror("Scan failed", msg, parent=self._us_win))
+                self.after(0, lambda: (self._us_btn.configure(state="normal", text="Scan"),
+                                       self._us_stop_btn.configure(state="disabled")))
             return
 
+        if gen != self._us_scan_gen:
+            return  # a newer scan started, or Stop was pressed - drop this result
         self._us_results = results
         self.after(0, self._us_refresh)
-        self.after(0, lambda: self._us_btn.configure(state="normal", text="Scan"))
+        self.after(0, lambda: (self._us_btn.configure(state="normal", text="Scan"),
+                               self._us_stop_btn.configure(state="disabled")))
         done = f"Found {len(results)} video(s)." if results else "No watchable videos found on that page."
         self.after(0, lambda: self._us_status.configure(
             text=done, text_color="#2fa84f" if results else "gray60"))

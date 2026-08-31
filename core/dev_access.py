@@ -88,7 +88,7 @@ def _verify_entry(entry, password):
 def _load():
     if os.path.exists(DEV_ACCESS_PATH):
         try:
-            with open(DEV_ACCESS_PATH, "r") as f:
+            with open(DEV_ACCESS_PATH, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -97,7 +97,7 @@ def _load():
 
 def _save(data):
     os.makedirs(os.path.dirname(DEV_ACCESS_PATH), exist_ok=True)
-    with open(DEV_ACCESS_PATH, "w") as f:
+    with open(DEV_ACCESS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 

@@ -102,6 +102,10 @@ def download_with_retry(download_fn, log_callback=None, max_attempts=MAX_DOWNLOA
     challenge - it needs cookies or a cooldown, not another attempt).
     Returns the download_fn's return value on success, or re-raises the
     last error after all attempts are used up."""
+    # Stages where retrying can't help - a bad format selector fails
+    # identically every time, it's pure string parsing (M5).
+    _NO_RETRY_STAGES = ("format selection",)
+    dl = getattr(download_fn, "__self__", None)
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
@@ -110,6 +114,11 @@ def download_with_retry(download_fn, log_callback=None, max_attempts=MAX_DOWNLOA
             raise
         except DownloadStageError as e:
             last_error = e
+            if e.stage in _NO_RETRY_STAGES:
+                raise
+            # B1: a Stop pressed between attempts must not be swallowed.
+            if dl is not None and getattr(dl, "_cancel", False):
+                raise DownloadCancelled("Download cancelled by user.")
             if log_callback and attempt < max_attempts:
                 log_callback(f"Attempt {attempt}/{max_attempts} failed ({e.stage}): {e.original} - retrying...")
     raise last_error
@@ -204,19 +213,21 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
     downloading anything. Used to name the auto-created playlist when
     'Download playlist' is on and to get the list of entry URLs to fetch.
 
-    Enumerates the playlist in BOUNDED WINDOWS (_PLAYLIST_WINDOW entries per
-    yt-dlp call via `playlist_items`), in a worker thread that pushes each
-    entry onto a queue as its window resolves. `timeout_seconds` is applied
-    per window (no new progress for that long -> treated as hung), not as a
-    total budget, so a playlist with tens of thousands of entries that keeps
-    making progress runs to completion. If some entries were collected and
-    then it stalls, that partial list is returned rather than failing.
+    Enumerates the playlist in ONE lazy pass (B3): `lazy_playlist` makes
+    yt-dlp yield entries as it paginates, so a worker thread can push each
+    onto a queue as it arrives - O(n) total, versus the old windowed
+    approach that re-enumerated from item 1 on every window (O(n^2), and
+    silently truncated large playlists when the slowdown tripped the stall
+    detector). `timeout_seconds` is the "no new entry for this long ->
+    treated as hung" budget; a playlist that keeps making progress runs to
+    completion. If some entries were collected and then it stalls, that
+    partial list is returned rather than failing.
 
     cancel_event: optional threading.Event; when set, enumeration stops
     within ~1s and PlaylistFetchCancelled is raised.
 
-    Raises: PlaylistFetchCancelled on cancel; PlaylistFetchTimeout if a
-    window makes no progress in time and nothing was collected;
+    Raises: PlaylistFetchCancelled on cancel; PlaylistFetchTimeout if the
+    lookup makes no progress in time and nothing was collected;
     DownloadStageError('playlist info fetch', ...) on a hard extractor
     failure with no partial results."""
     window_timeout = _coerce_timeout(timeout_seconds)
@@ -227,37 +238,31 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
         return internal_stop.is_set() or (cancel_event is not None and cancel_event.is_set())
 
     def worker():
-        base = {"quiet": True, "no_warnings": True, "skip_download": True,
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True,
                 "extract_flat": "in_playlist", "noplaylist": False,
-                "ignoreerrors": True,
+                "ignoreerrors": True, "lazy_playlist": True,
+                "playlistend": _PLAYLIST_WINDOW * _PLAYLIST_MAX_WINDOWS,  # sanity cap
                 "socket_timeout": max(15, min(window_timeout, 60))}
-        base.update(_ffmpeg_options())
+        opts.update(_ffmpeg_options())
         try:
-            start, sent_meta = 1, False
-            for _ in range(_PLAYLIST_MAX_WINDOWS):
-                if cancelled():
-                    break
-                opts = dict(base, playlist_items=f"{start}:{start + _PLAYLIST_WINDOW - 1}")
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if info is None:
-                        if not sent_meta:
-                            result_queue.put(("error", ValueError(
-                                "This URL didn't return any playlist data.")))
-                            return
-                        break
-                    if not sent_meta:
-                        result_queue.put(("meta", {k: info.get(k)
-                                                   for k in ("title", "id", "webpage_url")}))
-                        sent_meta = True
-                    window = [e for e in (info.get("entries") or []) if e]
-                for entry in window:
-                    if cancelled():
-                        break
-                    result_queue.put(("entry", entry))
-                if len(window) < _PLAYLIST_WINDOW or cancelled():
-                    break
-                start += _PLAYLIST_WINDOW
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info is None:
+                    result_queue.put(("error", ValueError(
+                        "This URL didn't return any playlist data.")))
+                    return
+                result_queue.put(("meta", {k: info.get(k)
+                                           for k in ("title", "id", "webpage_url")}))
+                entries = info.get("entries")
+                if entries is None:
+                    # A single video, not a playlist - treat it as a 1-entry list.
+                    result_queue.put(("entry", info))
+                else:
+                    for entry in entries:            # lazy generator - yields as it paginates
+                        if cancelled():
+                            break
+                        if entry:
+                            result_queue.put(("entry", entry))
             result_queue.put(("done", None))
         except Exception as e:
             result_queue.put(("error", e))
@@ -265,7 +270,7 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
 
-    meta, collected = {}, []
+    meta, collected, partial = {}, [], False
     last_progress = time.monotonic()
     while True:
         if cancel_event is not None and cancel_event.is_set():
@@ -280,7 +285,8 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
                     raise PlaylistFetchTimeout(
                         f"This playlist made no progress for {window_timeout}s and was treated "
                         f"as hung. Raise the timeout in Settings > Advanced if it's just very slow.")
-                break  # partial results
+                partial = True
+                break
             continue
         last_progress = time.monotonic()
         if kind == "meta":
@@ -292,6 +298,7 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
         elif kind == "error":
             if not collected:
                 raise DownloadStageError("playlist info fetch", payload)
+            partial = True
             break  # partial results are still useful
 
     if cancel_event is not None and cancel_event.is_set():
@@ -305,7 +312,7 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
         playlist_title = entry_list[0]["title"]
     if not playlist_title:
         playlist_title = "Playlist"
-    return {"playlist_title": playlist_title, "entries": entry_list}
+    return {"playlist_title": playlist_title, "entries": entry_list, "partial": partial}
 
 
 def cleanup_partial_files(out_dir, name, max_attempts=6, retry_delay=0.2):
@@ -617,7 +624,10 @@ class Downloader:
     def download_video(self, url, name, out_dir, quality_key, fmt,
                         playlist=False, subtitles=False, aspect_ratio="Any", cookies_from_browser="none",
                         prefetched_info=None):
-        self._cancel = False
+        # NB: _cancel is deliberately NOT reset here (B1). Every queue item
+        # builds its own Downloader, and download_with_retry re-enters this
+        # method for retries - resetting _cancel there let a Stop pressed
+        # between attempts get silently wiped.
         self.item_start_time = time.time()
         self.last_speed = None
         self.speed_tracker.reset()
@@ -684,7 +694,7 @@ class Downloader:
 
     def download_audio(self, url, name, out_dir, quality, fmt,
                         playlist=False, embed_thumbnail=True, cookies_from_browser="none"):
-        self._cancel = False
+        # _cancel deliberately not reset here - see download_video (B1).
         self.item_start_time = time.time()
         self.last_speed = None
         self.speed_tracker.reset()

@@ -214,7 +214,7 @@ def _run_migrations(cfg):
 def load_config():
     if os.path.exists(CONFIG_PATH):
         try:
-            with open(CONFIG_PATH, "r") as f:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             cfg = DEFAULT_CONFIG.copy()
             cfg.update(data)
@@ -227,7 +227,7 @@ def load_config():
 def save_config(cfg):
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=4)
     os.replace(tmp, CONFIG_PATH)
 
@@ -413,7 +413,7 @@ def check_and_apply_pending_import():
     if not os.path.exists(pending_path):
         return False, []
     try:
-        with open(pending_path, "r") as f:
+        with open(pending_path, "r", encoding="utf-8") as f:
             imported = json.load(f)
         merged, report = merge_imported_config(imported)
         save_config(merged)

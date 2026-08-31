@@ -300,7 +300,7 @@ class _ImportUI:
             ctk.CTkButton(row, text="Download", width=84, font=self.app.font_small,
                           command=lambda pid=pl["id"]: self.resolve_and_autoqueue(
                               f"spotify:playlist:{pid}")).grid(row=0, column=1, padx=6, pady=2)
-        tracks = res.get("tracks") or []
+        tracks = [t for t in (res.get("tracks") or []) if getattr(t, "spotify_id", "")]
         if tracks:
             ctk.CTkLabel(self.search_frame, text="Songs", font=self.app.font_small,
                          text_color="gray50").grid(row=r, column=0, sticky="w", pady=(4, 0)); r += 1
@@ -393,16 +393,18 @@ class _ImportUI:
             app.after(0, lambda: app._threadsafe_log(
                 f"Spotify import: matching {done}/{total} - {ref.title[:40]}"))
 
+        def fail(msg):
+            app.after(0, lambda: (self._set_status("", "gray60"),
+                                  messagebox.showerror("Spotify import", msg)))
+
         try:
             session = music_import.build_combined_session(
                 sources, spotify_client=client, cfg=_match_cfg(app),
                 progress_cb=prog, cancel_event=self._cancel)
         except (SpotifyError, ValueError) as e:
-            msg = str(e)
-            return app.after(0, lambda: messagebox.showerror("Spotify import", msg))
+            return fail(str(e))
         except Exception as e:
-            msg = f"Couldn't read that Spotify link: {e}"
-            return app.after(0, lambda: messagebox.showerror("Spotify import", msg))
+            return fail(f"Couldn't read that Spotify link: {e}")
         app.after(0, lambda: self._autoqueue_finish(session))
 
     def _autoqueue_finish(self, session):

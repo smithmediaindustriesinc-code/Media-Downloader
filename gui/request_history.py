@@ -255,9 +255,9 @@ def build_request_history_section(app, parent):
     list_frame = ctk.CTkScrollableFrame(list_view, height=280)
     list_frame.pack(fill="both", expand=True)
 
+    _render_sig = [None]  # mutable cell for the closure
+
     def refresh():
-        for w in list_frame.winfo_children():
-            w.destroy()
         in_progress, completed = get_all_requests()
         all_requests = in_progress + completed  # in_progress already sorted newest-first, then completed
 
@@ -297,12 +297,28 @@ def build_request_history_section(app, parent):
         # "Newest first" is already the natural order from get_all_requests()
         # (or, with a search active, the relevance-ranked order from above)
 
+        in_progress_ids = {r["request_id"] for r in in_progress}
+
+        # O2: skip the full teardown/rebuild when nothing visible changed
+        # (this fires every ~250ms during a batch).
+        sig = (query, type_choice, sort_choice, mode_var.get(), tuple(
+            (r["request_id"],
+             "in_progress" if r["request_id"] in in_progress_ids else r.get("overall", "failed"),
+             _first_title(r), r.get("custom_name"),
+             tuple(sorted(i.get("status", "") for i in r["items"].values())))
+            for r in all_requests))
+        if sig == _render_sig[0] and list_frame.winfo_children():
+            return
+        _render_sig[0] = sig
+
+        for w in list_frame.winfo_children():
+            w.destroy()
+
         if not all_requests:
             msg = "No download requests yet." if not (in_progress or completed) else "No requests match your search/filter."
             ctk.CTkLabel(list_frame, text=msg, font=app.font_normal, text_color="gray60").pack(pady=20)
             return
 
-        in_progress_ids = {r["request_id"] for r in in_progress}
         for req in all_requests:
             status_key = "in_progress" if req["request_id"] in in_progress_ids else req.get("overall", "failed")
             _build_request_row(app, list_frame, req, status_key, mode_var.get(), refresh, show_detail)

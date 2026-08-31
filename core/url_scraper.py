@@ -81,7 +81,9 @@ def scrape_media_urls(page_url, media_type="both", log_callback=None, timeout_ms
         "skip_download": True,
         "noplaylist": False,          # a page with several embeds -> collect them all
         "ignoreerrors": True,
-        "playlist_items": "1-50",     # sanity cap for a page that resolves to a huge feed
+        "playlist_items": "1-25",     # sanity cap for a page that resolves to a huge feed (M3)
+        "socket_timeout": 20,         # B4: don't hang forever on a dead page
+        "extractor_retries": 1,
     }
 
     log(f"Scanning {page_url} ...")

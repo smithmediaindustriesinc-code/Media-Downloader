@@ -33,7 +33,14 @@ from core.paths import app_dir
 REQUESTS_DIR = os.path.join(app_dir(), "history")
 REQUESTS_PATH = os.path.join(REQUESTS_DIR, "download_requests.json")
 
-_lock = threading.Lock()
+_lock = threading.RLock()
+
+# --- O1: mtime-aware cache. update_item fires several times per queue item
+# and each call used to fully parse + rewrite this file. Now the parsed
+# store is kept in memory and only re-read when another process (the queue
+# daemon) has actually touched the file. Writes stay immediate.
+_cache = None
+_cache_mtime = None
 
 # When False (GUI "Save download info" toggle), start_request returns None
 # and writes nothing; update_item / finish_request / add_item_to_request
@@ -60,10 +67,17 @@ def _default_store():
     return {"requests_in_progress": {}, "requests_completed": {}, "type_counters": {}}
 
 
-def _load():
+def _disk_mtime():
+    try:
+        return os.path.getmtime(REQUESTS_PATH)
+    except OSError:
+        return None
+
+
+def _read_disk():
     if os.path.exists(REQUESTS_PATH):
         try:
-            with open(REQUESTS_PATH, "r") as f:
+            with open(REQUESTS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             data.setdefault("requests_in_progress", {})
             data.setdefault("requests_completed", {})
@@ -74,12 +88,26 @@ def _load():
     return _default_store()
 
 
+def _load():
+    """The parsed store. Re-read from disk only when the file changed since
+    we last wrote it (i.e. the queue daemon touched it)."""
+    global _cache, _cache_mtime
+    mt = _disk_mtime()
+    if _cache is None or mt != _cache_mtime:
+        _cache = _read_disk()
+        _cache_mtime = mt
+    return _cache
+
+
 def _save(data):
+    global _cache, _cache_mtime
     os.makedirs(REQUESTS_DIR, exist_ok=True)
     tmp = REQUESTS_PATH + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, REQUESTS_PATH)
+    _cache = data
+    _cache_mtime = _disk_mtime()
 
 
 def request_type_key(dtype, mode):
@@ -264,11 +292,12 @@ def reopen_for_retry(request_id, url):
 def get_all_requests():
     """Returns (in_progress_list, completed_list), each sorted so newest
     is first, for display in the Extras tab's Request History."""
-    data = _load()
-    in_progress = sorted(data["requests_in_progress"].values(),
-                          key=lambda r: r["created_at"], reverse=True)
-    completed = sorted(data["requests_completed"].values(),
-                        key=lambda r: r.get("finished_at") or r["created_at"], reverse=True)
+    with _lock:
+        data = _load()
+        in_progress = sorted(data["requests_in_progress"].values(),
+                              key=lambda r: r["created_at"], reverse=True)
+        completed = sorted(data["requests_completed"].values(),
+                            key=lambda r: r.get("finished_at") or r["created_at"], reverse=True)
     return in_progress, completed
 
 
@@ -282,8 +311,10 @@ def find_previous_download(url, out_dir):
     if not url or not out_dir:
         return None
     out_dir_norm = os.path.normpath(os.path.abspath(out_dir))
-    data = _load()
-    for req in data["requests_completed"].values():
+    with _lock:
+        data = _load()
+        completed = list(data["requests_completed"].values())
+    for req in completed:
         item = req["items"].get(url)
         if item and item.get("status") == "success" and item.get("path"):
             item_path = item["path"]
@@ -296,9 +327,10 @@ def find_previous_download(url, out_dir):
 
 
 def get_request(request_id):
-    data = _load()
-    return (data["requests_in_progress"].get(request_id)
-            or data["requests_completed"].get(request_id))
+    with _lock:
+        data = _load()
+        return (data["requests_in_progress"].get(request_id)
+                or data["requests_completed"].get(request_id))
 
 
 def delete_request(request_id):

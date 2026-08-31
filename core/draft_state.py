@@ -24,7 +24,7 @@ def save_draft_state(fields):
     recent state of the text fields."""
     try:
         os.makedirs(os.path.dirname(DRAFT_STATE_PATH), exist_ok=True)
-        with open(DRAFT_STATE_PATH, "w") as f:
+        with open(DRAFT_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump({"saved_at": time.time(), "fields": fields}, f)
     except OSError:
         pass  # a failed draft save is never worth interrupting anything over
@@ -39,7 +39,7 @@ def load_draft_state():
     if not os.path.exists(DRAFT_STATE_PATH):
         return None
     try:
-        with open(DRAFT_STATE_PATH, "r") as f:
+        with open(DRAFT_STATE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         saved_at = data.get("saved_at", 0)
         age = time.time() - saved_at
