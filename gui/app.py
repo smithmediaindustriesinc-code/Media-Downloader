@@ -1496,11 +1496,17 @@ class App(*_APP_BASES):
                 elif not tip.get("sticky"):
                     over = anchor.winfo_containing(anchor.winfo_pointerx(),
                                                   anchor.winfo_pointery())
-                    ok = over is anchor
+                    # winfo_containing returns the innermost *tkinter* widget
+                    # under the pointer (for a CTk widget that's an inner
+                    # canvas/label, never the CTk object itself), so walk the
+                    # master chain and treat "over the anchor OR over the popup
+                    # OR over any descendant of either" as still-alive.
+                    ok = False
                     p = over
-                    while p is not None and not ok:
-                        if p is win:
+                    while p is not None:
+                        if p is win or p is anchor:
                             ok = True
+                            break
                         p = getattr(p, "master", None)
                     alive = ok
             except Exception:
