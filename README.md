@@ -108,7 +108,7 @@ organized and how to change or add features yourself.
 
 ### 1.7.3.1
 
-Small fixes on top of 1.7.3 (still a pre-release).
+Fixes and a round of optimizations on top of 1.7.3 (still a pre-release).
 
 - Downloads never leave a stray thumbnail image file next to the media — the
   thumbnail is embedded in the tags only, and any loose `.jpg` / `.webp` is
@@ -118,6 +118,20 @@ Small fixes on top of 1.7.3 (still a pre-release).
 - Pause / Continue / Stop / Restart buttons darken when they can't be used,
   and darken on hover when they can — so a usable button reads as
   "preselected" under the cursor.
+- **Stop is no longer lost** if you press it in the split-second between a
+  failed attempt and an automatic retry.
+- **Large playlists** are read in a single streaming pass instead of
+  re-scanning from the top for every 300 tracks — much faster, and it no
+  longer silently truncates very long playlists.
+- **History and Request-History tabs** keep their data in memory and only
+  redraw when something actually changed — no more full rebuild several times
+  a second during a batch.
+- Playlist downloads skip a redundant metadata lookup per track when the
+  format doesn't need it.
+- The page scanner has a Stop button and a 20-second network timeout.
+- All settings/history files are written as UTF-8.
+- Hint pop-ups no longer close half a second after you hover them (a 1.7.3
+  regression).
 
 ### 1.7.3
 
