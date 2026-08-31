@@ -889,20 +889,34 @@ class App(*_APP_BASES):
         ctl = ctk.CTkFrame(action_row, fg_color="transparent")
         ctl.pack(side="left")
         _b = dict(width=32, height=32, text="", corner_radius=6, state="disabled")
+        # Per button: (enabled fg, hover fg = darker, disabled fg = darkest).
+        # #D2 follow-up: both the disabled state AND hovering a usable button
+        # show a darker shade, so an unusable button reads as greyed-out and a
+        # usable one reads as "preselected" under the cursor.
+        self._ctl_colors = {
+            "pause_btn":    ("gray40",  "gray25",  "gray22"),
+            "continue_btn": ("#2fa84f", "#1f7d3a", "#1b3f29"),
+            "stop_btn":     ("#a13333", "#7a2525", "#3f2020"),
+            "restart_btn":  ("#3b8ed0", "#2c6a9c", "#1f3a4d"),
+        }
         self.pause_btn = ctk.CTkButton(ctl, image=self._ctl_icon("ctl_pause"),
-                                       fg_color="gray40", hover_color="gray30",
+                                       fg_color=self._ctl_colors["pause_btn"][2],
+                                       hover_color=self._ctl_colors["pause_btn"][1],
                                        command=self._pause_download, **_b)
         self.pause_btn.pack(side="left")
         self.continue_btn = ctk.CTkButton(ctl, image=self._ctl_icon("ctl_play"),
-                                          fg_color="#2fa84f", hover_color="#248a40",
+                                          fg_color=self._ctl_colors["continue_btn"][2],
+                                          hover_color=self._ctl_colors["continue_btn"][1],
                                           command=self._continue_download, **_b)
         self.continue_btn.pack(side="left", padx=(6, 0))
         self.stop_btn = ctk.CTkButton(ctl, image=self._ctl_icon("ctl_stop"),
-                                      fg_color="#a13333", hover_color="#7d2626",
+                                      fg_color=self._ctl_colors["stop_btn"][2],
+                                      hover_color=self._ctl_colors["stop_btn"][1],
                                       command=self.cancel_download, **_b)
         self.stop_btn.pack(side="left", padx=(6, 0))
         self.restart_btn = ctk.CTkButton(ctl, image=self._ctl_icon("ctl_restart"),
-                                         fg_color="#3b8ed0", hover_color="#2f72a8",
+                                         fg_color=self._ctl_colors["restart_btn"][2],
+                                         hover_color=self._ctl_colors["restart_btn"][1],
                                          command=self._restart_download, **_b)
         self.restart_btn.pack(side="left", padx=(6, 0))
         # Back-compat: existing code still does self.cancel_btn.configure(state=...)
@@ -3026,15 +3040,22 @@ class App(*_APP_BASES):
     def _sync_transport_buttons(self):
         active = getattr(self, "_download_active", False)
         paused = getattr(self, "_paused", False)
-        for btn, on in ((getattr(self, "pause_btn", None), active and not paused),
-                        (getattr(self, "continue_btn", None), active and paused),
-                        (getattr(self, "stop_btn", None), active),
-                        (getattr(self, "restart_btn", None), active)):
-            if btn is not None:
-                try:
-                    btn.configure(state="normal" if on else "disabled")
-                except Exception:
-                    pass
+        colors = getattr(self, "_ctl_colors", {})
+        for name, on in (("pause_btn", active and not paused),
+                         ("continue_btn", active and paused),
+                         ("stop_btn", active),
+                         ("restart_btn", active)):
+            btn = getattr(self, name, None)
+            if btn is None:
+                continue
+            try:
+                enabled_fg, _hover, disabled_fg = colors.get(name, (None, None, None))
+                cfg = {"state": "normal" if on else "disabled"}
+                if enabled_fg is not None:
+                    cfg["fg_color"] = enabled_fg if on else disabled_fg
+                btn.configure(**cfg)
+            except Exception:
+                pass
 
     def _pause_download(self):
         if not getattr(self, "_download_active", False):
@@ -3414,9 +3435,10 @@ class App(*_APP_BASES):
             messagebox.showwarning("Not found", "That playlist's folder couldn't be opened.")
 
     def _play_playlist(self):
-        """Queue every media file in the playlist folder into the chosen
-        media player and start playing (#P1). Uses media_player_path;
-        VLC gets its files as one enqueue so it plays through them."""
+        """Play the WHOLE playlist (#P1). Writes an .m3u8 of every media file
+        in the playlist folder and hands that one file to the media player -
+        every player (VLC, MPC-HC, WMP, foobar, ...) opens an .m3u8 as a full
+        queue, so all the songs play, not just the first."""
         if not self.selected_playlist:
             return
         folder = self._playlist_folder(self.selected_playlist)
@@ -3424,30 +3446,33 @@ class App(*_APP_BASES):
             messagebox.showwarning("Not found", "That playlist folder couldn't be found.")
             return
         exts = (".mp3", ".m4a", ".opus", ".flac", ".wav", ".ogg", ".aac",
-                ".mp4", ".mkv", ".webm", ".mov", ".avi")
+                ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v")
         files = sorted(os.path.join(folder, f) for f in os.listdir(folder)
                        if f.lower().endswith(exts))
         if not files:
             messagebox.showinfo("Play playlist", "This playlist has no media files yet.")
             return
-        player = (self.cfg.get("media_player_path", "") or "").strip()
+        # Written outside the playlist folder (with absolute paths) so it never
+        # shows up as a "track" in the playlist's own file list.
+        from core.paths import app_dir
+        opt_dir = os.path.join(app_dir(), "options")
         try:
-            if player and os.path.isfile(player):
-                args = [player]
-                if "vlc" in os.path.basename(player).lower():
-                    args += ["--no-one-instance", "--playlist-enqueue"]
-                subprocess.Popen(args + files)
-            else:
-                # no dedicated player set - hand the folder to the OS
-                # (opens the first file's default app; user can use its own
-                # "play folder" from there) and tell them.
-                open_file(files[0])
-                self._log("No media player set (Settings -> Advanced) - opened the first "
-                          "track with the system default. Set a player like VLC to play "
-                          "the whole playlist.")
-        except Exception as e:
-            log_error("play_playlist", e)
-            messagebox.showwarning("Play playlist", f"Couldn't start playback: {e}")
+            os.makedirs(opt_dir, exist_ok=True)
+            m3u_path = os.path.join(opt_dir, "_playlist_play.m3u8")
+            with open(m3u_path, "w", encoding="utf-8") as fh:
+                fh.write("#EXTM3U\n")
+                for f in files:
+                    fh.write(os.path.abspath(f) + "\n")
+        except OSError as e:
+            log_error("play_playlist_write_m3u", e)
+            messagebox.showwarning("Play playlist", f"Couldn't build the playlist file: {e}")
+            return
+        ok, msg = open_media(m3u_path, self.cfg.get("media_player_path", ""))
+        if ok:
+            self._log(f'Playing playlist "{self.selected_playlist}" ({len(files)} tracks).')
+        else:
+            log_error("play_playlist", Exception(msg))
+            messagebox.showwarning("Play playlist", msg or "Couldn't start playback.")
 
     def _remove_from_playlist(self, filename):
         remove_file_from_playlist(self.cfg.get("playlists_path", ""), self.selected_playlist, filename)

@@ -488,14 +488,21 @@ def fetch_download_size(url, dtype="Video", quality_key="Best", fmt="mp4",
         return None
 
 
+_STRAY_IMAGE_EXTS = ("jpg", "jpeg", "png", "webp", "gif", "bmp")
+
+
 def _cleanup_stray_part_files(out_dir, name, final_path):
     """After a SUCCESSFUL download, removes any leftover .part/.ytdl
     fragment files - a real, confirmed gap in yt-dlp's own cleanup,
     especially with concurrent_fragment_downloads (used here) and
     post-processing (merge/recode/extract) leaving intermediate files
-    behind. Never touches final_path itself, only genuine stray
-    leftovers matching this item's own name."""
-    for pattern in (f"{name}.*.part", f"{name}.part", f"{name}.*.ytdl", f"{name}.ytdl"):
+    behind - AND any leftover thumbnail image written next to the media
+    (the user only ever wants the thumbnail embedded in metadata, never
+    as its own file on disk). Never touches final_path itself, only
+    genuine stray leftovers matching this item's own name."""
+    patterns = [f"{name}.*.part", f"{name}.part", f"{name}.*.ytdl", f"{name}.ytdl"]
+    patterns += [f"{name}.{ext}" for ext in _STRAY_IMAGE_EXTS]
+    for pattern in patterns:
         for path in glob.glob(os.path.join(out_dir, pattern)):
             if os.path.abspath(path) == os.path.abspath(final_path):
                 continue
@@ -705,10 +712,17 @@ class Downloader:
         options.update(_ffmpeg_options())
         options.update(_cookie_options(cookies_from_browser))
         if embed_thumbnail:
-            options["writethumbnail"] = True
             postprocessors.append({"key": "FFmpegMetadata"})
-            if fmt in ("mp3", "m4a", "flac", "opus"):
-                postprocessors.append({"key": "EmbedThumbnail"})
+            # Only pull the thumbnail down at all when we can actually embed it
+            # into this container - otherwise yt-dlp leaves a stray .webp/.jpg
+            # next to the audio, which the user never wants (thumbnail belongs
+            # in the tags, never as its own file).
+            if fmt in ("mp3", "m4a", "flac", "opus", "ogg"):
+                options["writethumbnail"] = True
+                # already_have_thumbnail=False -> EmbedThumbnail deletes the
+                # downloaded image after embedding it.
+                postprocessors.append({"key": "EmbedThumbnail",
+                                       "already_have_thumbnail": False})
 
         self._log(f"Analyzing link: {url}")
         try:

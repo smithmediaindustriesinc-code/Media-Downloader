@@ -106,6 +106,19 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.7.3.1
+
+Small fixes on top of 1.7.3 (still a pre-release).
+
+- Downloads never leave a stray thumbnail image file next to the media — the
+  thumbnail is embedded in the tags only, and any loose `.jpg` / `.webp` is
+  cleaned up.
+- **Play playlist** now queues the *whole* playlist (writes an `.m3u8` and
+  hands that to the player), not just the first track.
+- Pause / Continue / Stop / Restart buttons darken when they can't be used,
+  and darken on hover when they can — so a usable button reads as
+  "preselected" under the cursor.
+
 ### 1.7.3
 
 Spotify search, transport controls, a rebuilt page scraper, and a batch of
