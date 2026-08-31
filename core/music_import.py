@@ -146,6 +146,58 @@ def build_session(text, spotify_client=None, cfg=None, progress_cb=None,
     )
 
 
+def build_combined_session(texts, spotify_client=None, cfg=None, progress_cb=None,
+                           cancel_event=None) -> ImportSession:
+    """#S4: resolve several Spotify links / pasted lists in one pipeline.
+
+    Each source is resolved one by one, all of their tracks are pooled
+    (de-duplicated by Spotify id / artist+title), then matched to YouTube in a
+    single pass. Returns one ImportSession covering everything. A single source
+    is delegated straight to build_session so the resync metadata (spotify_id /
+    snapshot_id) is preserved for that common case.
+
+    Raises ValueError/SpotifyError only if EVERY source fails; a source that
+    fails on its own is skipped and noted via progress_cb.
+    """
+    sources = [t.strip() for t in texts if t and t.strip()]
+    if not sources:
+        raise ValueError("No Spotify links given.")
+    if len(sources) == 1:
+        return build_session(sources[0], spotify_client, cfg, progress_cb, cancel_event)
+
+    pooled, seen, names, errors = [], set(), [], []
+    for src in sources:
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        try:
+            _kind, name, _sid, _snap, tracks = resolve_source(src, spotify_client)
+        except Exception as e:  # noqa: BLE001 - one bad link shouldn't sink the batch
+            errors.append(f"{src}: {e}")
+            continue
+        names.append(name)
+        for ref in tracks:
+            key = (getattr(ref, "spotify_id", "") or
+                   f"{(ref.artist_str or '').lower()}|{(ref.title or '').lower()}")
+            if key in seen:
+                continue
+            seen.add(key)
+            pooled.append(ref)
+
+    if not pooled:
+        raise ValueError("None of those Spotify links could be read.\n\n" + "\n".join(errors))
+
+    matched = match_tracks(pooled, cfg, progress_cb, cancel_event)
+    display = f"{len(sources)} Spotify links ({len(pooled)} tracks)"
+    return ImportSession(
+        source_text="\n".join(sources),
+        kind="spotify-multi",
+        name=display,
+        spotify_id="",
+        snapshot_id="",
+        tracks=matched,
+    )
+
+
 # ============================================================================
 # Persistence: <app_dir>/music_imports.json
 # ============================================================================

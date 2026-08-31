@@ -362,30 +362,40 @@ class _ImportUI:
 
     # -- called from the Download tab (paste a Spotify link there) ---- #
     def resolve_and_autoqueue(self, text):
-        """Resolve `text` (a Spotify link), queue every confident match into
-        the batch queue right away, and - only if some tracks still need a
-        manual pick - switch to this tab with those loaded so the user can
-        sort them out. Runs on a worker; safe to call from the Download tab."""
+        """Resolve `text` (one Spotify link, or several - a list, or newline-
+        separated - #S4), queue every confident match into the batch queue
+        right away, and - only if some tracks still need a manual pick - switch
+        to this tab with those loaded so the user can sort them out. Runs on a
+        worker; safe to call from the Download tab."""
+        if isinstance(text, (list, tuple)):
+            sources = [str(t).strip() for t in text if str(t).strip()]
+        else:
+            sources = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+        display = "\n".join(sources)
         self.input_box.delete("1.0", "end")
-        self.input_box.insert("1.0", text)
+        self.input_box.insert("1.0", display)
         for w in self.results.winfo_children():
             w.destroy()
         self.row_widgets = []
         self._cancel = threading.Event()
-        self._set_status("Reading the Spotify track list...", "gray60")
-        threading.Thread(target=self._autoqueue_worker, args=(text,), daemon=True).start()
+        self._set_status(
+            "Reading the Spotify track list..." if len(sources) == 1
+            else f"Reading {len(sources)} Spotify links...", "gray60")
+        threading.Thread(target=self._autoqueue_worker, args=(sources,), daemon=True).start()
 
-    def _autoqueue_worker(self, text):
+    def _autoqueue_worker(self, sources):
         app = self.app
         client = get_spotify_client(app)
+        if isinstance(sources, str):
+            sources = [sources]
 
         def prog(done, total, ref):
             app.after(0, lambda: app._threadsafe_log(
                 f"Spotify import: matching {done}/{total} - {ref.title[:40]}"))
 
         try:
-            session = music_import.build_session(
-                text, spotify_client=client, cfg=_match_cfg(app),
+            session = music_import.build_combined_session(
+                sources, spotify_client=client, cfg=_match_cfg(app),
                 progress_cb=prog, cancel_event=self._cancel)
         except (SpotifyError, ValueError) as e:
             msg = str(e)
@@ -652,14 +662,12 @@ def try_handle_download_spotify(app, lines):
         messagebox.showinfo(
             "Spotify link",
             "Mixing a Spotify link with other URLs in one go isn't supported.\n\n"
-            'Put the Spotify link in on its own, or use "Import from Spotify".')
+            'Put the Spotify link(s) in on their own, or use "Import from Spotify".')
         return "mixed"
-    if len(spotify) > 1:
-        messagebox.showinfo(
-            "Spotify links",
-            'One Spotify link at a time here - use "Import from Spotify" to queue several.')
-        return "mixed"
-    _get_import_ui(app).resolve_and_autoqueue(spotify[0])
+    # #S4: one or several Spotify links pipeline the same way - resolve each,
+    # pool the tracks, match on YouTube, queue confident matches, and open the
+    # Spotify window only for the ones that still need a manual pick.
+    _get_import_ui(app).resolve_and_autoqueue(spotify)
     return "handled"
 
 
