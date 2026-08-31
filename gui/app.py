@@ -907,11 +907,6 @@ class App(*_APP_BASES):
         self.restart_btn.pack(side="left", padx=(6, 0))
         # Back-compat: existing code still does self.cancel_btn.configure(state=...)
         self.cancel_btn = self.stop_btn
-        for _txt, _btn in (("Pause download", self.pause_btn),
-                           ("Resume download", self.continue_btn),
-                           ("Stop download", self.stop_btn),
-                           ("Restart from the beginning", self.restart_btn)):
-            self._add_tooltip(_btn, _txt)
 
         ctk.CTkButton(action_row, text="Clear log", font=self.font_normal, height=32,
                       fg_color="gray40", hover_color="gray30",
