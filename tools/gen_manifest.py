@@ -48,7 +48,11 @@ def fetch_releases():
     """Fetch releases from GitHub. Returns list of release dicts, or None on error."""
     try:
         cmd = ["gh", "api", "--paginate", f"repos/{REPO}/releases"]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # encoding must be explicit - GitHub returns UTF-8, but text=True
+        # otherwise decodes with the Windows locale codepage and mangles any
+        # non-ASCII in release notes (em dashes, etc).
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", check=True)
         data = json.loads(result.stdout)
         return data if isinstance(data, list) else [data]
     except subprocess.CalledProcessError as e:
@@ -67,8 +71,13 @@ def _extract_notes(body):
         line = line.strip()
         if not line:
             continue
-        # Remove leading markdown markers
-        line = re.sub(r"^[#\*\-\s]+", "", line).strip()
+        # Remove leading markdown markers, drop trailing ** bold markers,
+        # and normalise common unicode punctuation to ASCII so the manifest
+        # stays plain-ASCII regardless of what the release notes used.
+        line = re.sub(r"^[#\*\-\s]+", "", line).replace("**", "").strip()
+        line = (line.replace("—", "-").replace("–", "-")
+                    .replace("’", "'").replace("“", '"')
+                    .replace("”", '"').replace("…", "..."))
         if line:
             return line[:200]
     return ""
@@ -89,15 +98,25 @@ def _find_exe_asset(assets, version, beta=False):
                 return asset, asset.get("browser_download_url")
         return None, None
 
-    exact = f"MediaDownloaderSetup{version}.exe"
-    for asset in assets:
-        if asset.get("name") == exact:
-            return asset, asset.get("browser_download_url")
+    # Try the exact per-version name, and also the name with any
+    # -preview / -rc / -dev suffix stripped (the asset is usually
+    # MediaDownloaderSetup1.7.3.1.exe even when the TAG is v1.7.3.1-preview).
+    base_version = version.split("-", 1)[0]
+    for cand in (f"MediaDownloaderSetup{version}.exe",
+                 f"MediaDownloaderSetup{base_version}.exe"):
+        for asset in assets:
+            if asset.get("name") == cand:
+                return asset, asset.get("browser_download_url")
 
-    # Fall back to the first non-beta .exe.
+    # Fall back to the first per-version .exe - a versioned name like
+    # MediaDownloaderSetup1.7.3.1.exe, NOT the bare bootstrapper
+    # (MediaDownloaderSetup.exe) or a -beta variant.
     for asset in assets:
         name = asset.get("name", "")
-        if name.endswith(".exe") and "-beta" not in name:
+        if (name.startswith("MediaDownloaderSetup")
+                and name.endswith(".exe")
+                and name != "MediaDownloaderSetup.exe"
+                and "-beta" not in name):
             return asset, asset.get("browser_download_url")
 
     return None, None
@@ -239,7 +258,7 @@ def main():
     output = json.dumps(entries, indent=2) + "\n"
 
     if args.out:
-        with open(args.out, "w") as f:
+        with open(args.out, "w", encoding="utf-8") as f:
             f.write(output)
         print(f"Wrote {len(entries)} entries to {args.out}", file=sys.stderr)
     else:
