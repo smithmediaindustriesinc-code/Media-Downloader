@@ -54,10 +54,6 @@ echo.
 REM --- build -----------------------------------------------------------------
 REM --collect-data customtkinter : bundle customtkinter's theme JSON files
 REM                                ^(app crashes on launch without them^).
-REM --collect-all playwright     : bundle the Playwright package + driver so URL
-REM                                Scraping works ^(the Chromium browser itself
-REM                                is still a separate post-install download -
-REM                                see installer.iss's --playwright-install step^).
 REM --collect-all tkinterdnd2    : bundle the tkdnd Tcl binaries used by the
 REM                                drag-a-thumbnail-onto-the-window feature.
 REM --exclude-module pygame*     : never needed by this app; keeps the build lean
@@ -71,7 +67,6 @@ echo.
     --add-data "icon.ico;." ^
     --add-data "updates;updates" ^
     --collect-data customtkinter ^
-    --collect-all playwright ^
     --collect-all tkinterdnd2 ^
     --collect-all syncedlyrics ^
     --collect-submodules mutagen ^
@@ -85,9 +80,9 @@ if exist "dist\MediaDownloader\MediaDownloader.exe" (
     echo Build complete:  dist\MediaDownloader\MediaDownloader.exe
     echo ============================================================
     echo Share the whole  dist\MediaDownloader\  folder - it is a --onedir
-    echo build, not a single file. Runtime data ^(config, history, ffmpeg,
-    echo playwright-browsers^) is created under %%APPDATA%%\Media Downloader
-    echo on first run, so nothing else on the PC is touched.
+    echo build, not a single file. Runtime data ^(config, history, ffmpeg^)
+    echo is created under %%APPDATA%%\Media Downloader on first run, so nothing
+    echo else on the PC is touched.
     echo.
     echo To make a real installer next, compile installer.iss with Inno Setup.
 ) else (

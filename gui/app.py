@@ -827,6 +827,9 @@ class App(*_APP_BASES):
         spotify_row.grid(row=5, column=0, columnspan=4, sticky="ew", padx=15, pady=(0, 12))
         ctk.CTkButton(spotify_row, text="Import from Spotify...", font=self.font_normal,
                       command=lambda: self._open_spotify_dialog()).pack(side="left")
+        ctk.CTkButton(spotify_row, text="Scrape page for videos...", font=self.font_normal,
+                      fg_color="gray40", hover_color="gray30",
+                      command=lambda: self._open_url_scraper_dialog()).pack(side="left", padx=(10, 0))
         ctk.CTkLabel(spotify_row, text="  (or just paste a Spotify link in the box below)",
                      font=self.font_small, text_color="gray55").pack(side="left")
 
@@ -1879,8 +1882,6 @@ class App(*_APP_BASES):
                                     f"Would you like to log in now?"):
             return False
         self.tabview.set("More")
-        if hasattr(self, "more_tabview"):
-            self.more_tabview.set("Information")
         if hasattr(self, "_dev_login_area") and not self._dev_login_area.winfo_ismapped():
             self._dev_login_area.pack(anchor="w", pady=(0, 15))
         if hasattr(self, "dev_user_entry"):
@@ -5446,227 +5447,139 @@ class App(*_APP_BASES):
     # developer login that dynamically opens the Developer tab.
     # ================================================================== #
     def _build_more_tab(self, tab):
-        """More has two subtabs: URL Scraping (the primary one as of 1.6.0 -
-        first in order and the default landing subtab) and Information
-        (disclaimer, dev login, uninstall)."""
+        """More is now just the Information page (disclaimer, dev login,
+        uninstall). The page scraper moved to a button on the Download tab
+        that opens its own window (#U2)."""
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
-        self.more_tabview = ctk.CTkTabview(tab)
-        self.more_tabview.grid(row=0, column=0, sticky="nsew")
-        scraping_tab = self.more_tabview.add("URL Scraping")
-        info_tab = self.more_tabview.add("Information")
-        self._build_url_scraping_subtab(scraping_tab)
-        self._build_more_information_subtab(info_tab)
-        self.more_tabview.set("URL Scraping")  # default landing subtab (1.6.0)
+        self._build_more_information_subtab(tab)
 
-    def _build_url_scraping_subtab(self, tab):
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(4, weight=1)
-
-        ctk.CTkLabel(tab, text="Scrapes a page (using a real headless browser, so JS-loaded/streamed "
-                               "media is caught too, not just what's in the raw HTML) for video/audio URLs, "
-                               "then fetches each one's real title before showing you anything.",
-                     font=self.font_small, text_color="gray60", wraplength=600, justify="left").grid(
-            row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-
-        input_row = ctk.CTkFrame(tab, fg_color="transparent")
-        input_row.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
-        input_row.grid_columnconfigure(0, weight=1)
-        self.scrape_url_entry = ctk.CTkEntry(input_row, placeholder_text="https://... - page to scrape",
-                                              font=self.font_normal)
-        self.scrape_url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.scrape_url_entry.bind("<Return>", lambda e: self._start_url_scrape())
-        self._add_clear_button(input_row, self.scrape_url_entry).grid(row=0, column=1, padx=(0, 8))
-        self.scrape_type_var = ctk.StringVar(value="Both")
-        ScrollableDropdown(input_row, ["Both", "Video", "Audio"], self.scrape_type_var,
-                            font=self.font_normal, width=110).grid(row=0, column=2, padx=(0, 8))
-        self.scrape_button = ctk.CTkButton(input_row, text="Scrape", font=self.font_normal, width=100,
-                                            command=self._start_url_scrape)
-        self.scrape_button.grid(row=0, column=3)
-
-        self.scrape_status_label = ctk.CTkLabel(tab, text="", font=self.font_small, text_color="gray60")
-        self.scrape_status_label.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 6))
-
-        # A real, confirmed bug fixed here: this row used to collide with
-        # scrape_status_label at the same grid row (row=2 for both, with
-        # this row also carrying an unrelated large top padding) - the
-        # combination made this toolbar's actual on-screen position
-        # unpredictable, reading as "renders far down where it's
-        # supposed to render" (a stray leftover pady, and the row
-        # collision itself, not a real "far down" position). Now has its
-        # own row, normal padding, matching how every other selection
-        # toolbar in the app is placed.
-        toolbar_row = ctk.CTkFrame(tab, fg_color="transparent")
-        toolbar_row.grid(row=3, column=0, sticky="w", padx=10, pady=(0, 6))
-        from gui.advanced_select import AdvancedSelector, build_selection_toolbar
-        self._scrape_results = []
-        self.scrape_selector = AdvancedSelector()
-        build_selection_toolbar(
-            toolbar_row, self.scrape_selector,
-            all_ids_getter=lambda: [r["url"] for r in self._scrape_results],
-            on_download=self._download_selected_scrape_results, on_copy=self._copy_selected_scrape_results,
-            font_normal=self.font_normal, font_small=self.font_small)
-        base_on_change = self.scrape_selector.on_change
-
-        def combined_on_change():
-            base_on_change()
-            self._refresh_scrape_results_display()
-        self.scrape_selector.on_change = combined_on_change
-
-        self.scrape_results_frame = ctk.CTkScrollableFrame(tab)
-        self.scrape_results_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
-        self._refresh_scrape_results_display()  # show the "No results yet" placeholder from the start
-
-    def _start_url_scrape(self):
-        url = self.scrape_url_entry.get().strip()
-        if not url:
-            messagebox.showwarning("URL Scraping", "Enter a URL first.")
+    # ================================================================== #
+    # PAGE SCRAPER (#U1/#U2) - "give me every watchable video on this page"
+    # Opened from the Download tab; yt-dlp's generic extractor, no browser.
+    # ================================================================== #
+    def _open_url_scraper_dialog(self):
+        win = getattr(self, "_us_win", None)
+        if win is not None and win.winfo_exists():
+            win.deiconify()
+            win.lift()
+            win.focus_force()
             return
-        self.scrape_button.configure(state="disabled", text="Scraping...")
-        media_type = {"Both": "both", "Video": "video", "Audio": "audio"}.get(self.scrape_type_var.get(), "both")
-        threading.Thread(target=self._run_url_scrape, args=(url, media_type), daemon=True).start()
 
-    def _run_url_scrape(self, url, media_type, offer_install=True):
-        from core.url_scraper import scrape_media_urls, fetch_titles_for_urls
+        win = ctk.CTkToplevel(self)
+        self._us_win = win
+        win.title("Scrape a page for videos")
+        win.geometry("720x560")
+        win.transient(self)
+        win.protocol("WM_DELETE_WINDOW", win.withdraw)
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(win, text="Enter any web page. Every real video a person would watch on it "
+                               "(embedded players, <video> tags, YouTube/Vimeo/etc. iframes) is "
+                               "listed below - ad blips and tracking junk are skipped.",
+                     font=self.font_small, text_color="gray60", wraplength=660,
+                     justify="left").grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+
+        input_row = ctk.CTkFrame(win, fg_color="transparent")
+        input_row.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 6))
+        input_row.grid_columnconfigure(0, weight=1)
+        self._us_url_entry = ctk.CTkEntry(input_row, placeholder_text="https://... - page to scan",
+                                          font=self.font_normal)
+        self._us_url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._us_url_entry.bind("<Return>", lambda e: self._us_start())
+        self._add_clear_button(input_row, self._us_url_entry).grid(row=0, column=1, padx=(0, 8))
+        self._us_type_var = ctk.StringVar(value="Both")
+        ScrollableDropdown(input_row, ["Both", "Video", "Audio"], self._us_type_var,
+                            font=self.font_normal, width=100).grid(row=0, column=2, padx=(0, 8))
+        self._us_btn = ctk.CTkButton(input_row, text="Scan", font=self.font_normal, width=90,
+                                     command=self._us_start)
+        self._us_btn.grid(row=0, column=3)
+
+        foot = ctk.CTkFrame(win, fg_color="transparent")
+        foot.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 6))
+        self._us_status = ctk.CTkLabel(foot, text="", font=self.font_small, text_color="gray60")
+        self._us_status.pack(side="left")
+        self._us_queue_all_btn = ctk.CTkButton(foot, text="Queue all", font=self.font_small, width=100,
+                                               state="disabled",
+                                               command=lambda: self._us_queue(list(self._us_results)))
+        self._us_queue_all_btn.pack(side="right")
+
+        self._us_results_frame = ctk.CTkScrollableFrame(win)
+        self._us_results_frame.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 14))
+        self._us_results = []
+        self._us_refresh()
+
+    def _us_start(self):
+        url = self._us_url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("Scrape a page", "Enter a URL first.", parent=self._us_win)
+            return
+        self._us_btn.configure(state="disabled", text="Scanning...")
+        self._us_queue_all_btn.configure(state="disabled")
+        self._us_status.configure(text="Scanning the page (this can take a few seconds)...",
+                                  text_color="gray60")
+        media_type = {"Both": "both", "Video": "video", "Audio": "audio"}.get(
+            self._us_type_var.get(), "both")
+        threading.Thread(target=self._us_run, args=(url, media_type), daemon=True).start()
+
+    def _us_run(self, url, media_type):
+        from core.url_scraper import scrape_media_urls
 
         def log(msg):
-            self.after(0, lambda: self.scrape_status_label.configure(text=msg, text_color="gray60"))
+            self.after(0, lambda: self._us_status.configure(text=msg, text_color="gray60"))
 
         try:
-            urls = scrape_media_urls(url, media_type=media_type, log_callback=log)
-            named = fetch_titles_for_urls(urls, log_callback=log) if urls else []
+            results = scrape_media_urls(url, media_type=media_type, log_callback=log)
         except Exception as e:
-            error_text = str(e)
-            # Playwright's own error message for this specific case is
-            # long, technical, and gives no indication of what to
-            # actually DO about it - detected here specifically so the
-            # app can offer the actual fix (install the browser, then
-            # automatically retry) instead of just dumping that raw
-            # text at the user, per how this was specifically asked for
-            # after the reported "executable is not found" bug.
-            missing_browser = "Executable doesn't exist" in error_text or "playwright install" in error_text
-            if missing_browser and offer_install:
-                self.after(0, lambda: self._offer_playwright_install_and_retry(url, media_type))
-            elif missing_browser:
-                # Already went through the install flow once this attempt -
-                # don't loop back into the same popup. Show a plain error.
-                self.after(0, lambda: messagebox.showerror(
-                    "URL Scraping unavailable",
-                    "The browser component still isn't working after installing it.\n\n"
-                    "Try restarting the app. If it keeps failing, you can reinstall it "
-                    "from a command prompt with:  playwright install chromium"))
-                self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
-            else:
-                self.after(0, lambda: messagebox.showerror("Scrape failed", error_text))
-                self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
+            msg = str(e)
+            self.after(0, lambda: messagebox.showerror("Scan failed", msg, parent=self._us_win))
+            self.after(0, lambda: self._us_btn.configure(state="normal", text="Scan"))
             return
 
-        self._scrape_results = [{"url": u, "name": n} for u, n in named]
-        self.after(0, self._refresh_scrape_results_display)
-        self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
-        msg = f"Found {len(named)} item(s)." if named else "No media URLs found on that page."
-        self.after(0, lambda: self.scrape_status_label.configure(
-            text=msg, text_color="#2fa84f" if named else "gray60"))
+        self._us_results = results
+        self.after(0, self._us_refresh)
+        self.after(0, lambda: self._us_btn.configure(state="normal", text="Scan"))
+        done = f"Found {len(results)} video(s)." if results else "No watchable videos found on that page."
+        self.after(0, lambda: self._us_status.configure(
+            text=done, text_color="#2fa84f" if results else "gray60"))
+        self.after(0, lambda: self._us_queue_all_btn.configure(
+            state="normal" if results else "disabled"))
 
-    def _offer_playwright_install_and_retry(self, url, media_type):
-        """Reached when scraping fails specifically because Playwright's
-        Chromium browser isn't installed yet - offers to install it now
-        (reusing the same ensure_playwright_browser_installed() the
-        installer itself runs) and automatically retries the original
-        scrape once it succeeds, rather than leaving the user to figure
-        out what "Executable doesn't exist" means and how to fix it."""
-        if not messagebox.askyesno(
-                "Browser component needed",
-                "URL Scraping needs a browser component that hasn't been installed yet "
-                "(this is a one-time download, roughly a couple hundred MB).\n\n"
-                "Install it now?"):
-            self.scrape_button.configure(state="normal", text="Scrape")
-            return
-        self.scrape_status_label.configure(text="Installing browser component...", text_color="gray60")
-        threading.Thread(target=self._install_playwright_then_retry, args=(url, media_type), daemon=True).start()
-
-    def _install_playwright_then_retry(self, url, media_type):
-        from core.url_scraper import ensure_playwright_browser_installed
-        ok, message = ensure_playwright_browser_installed()
-        if ok:
-            self.after(0, lambda: self.scrape_status_label.configure(
-                text="Browser installed - retrying...", text_color="#2fa84f"))
-            # offer_install=False: if the retry STILL can't find the browser,
-            # surface a plain error instead of looping back to this popup.
-            self._run_url_scrape(url, media_type, offer_install=False)
-        else:
-            self.after(0, lambda: messagebox.showerror("Install failed", message))
-            self.after(0, lambda: self.scrape_button.configure(state="normal", text="Scrape"))
-
-    def _refresh_scrape_results_display(self):
-        for w in self.scrape_results_frame.winfo_children():
+    def _us_refresh(self):
+        for w in self._us_results_frame.winfo_children():
             w.destroy()
-        if not self._scrape_results:
-            ctk.CTkLabel(self.scrape_results_frame, text="No results yet - scrape a page above.",
+        if not self._us_results:
+            ctk.CTkLabel(self._us_results_frame, text="No results yet - scan a page above.",
                          font=self.font_normal, text_color="gray60").pack(pady=20)
             return
-        for item in self._scrape_results:
-            row = ctk.CTkFrame(self.scrape_results_frame)
+        for item in self._us_results:
+            row = ctk.CTkFrame(self._us_results_frame)
             row.pack(fill="x", pady=3)
-            col = 0
-            if self.scrape_selector.enabled:
-                cb_var = ctk.BooleanVar(value=self.scrape_selector.is_selected(item["url"]))
-                ctk.CTkCheckBox(row, text="", variable=cb_var, width=20,
-                                command=lambda u=item["url"]: self.scrape_selector.toggle(u)).grid(
-                    row=0, column=0, rowspan=2, padx=(10, 2), pady=8)
-                col = 1
-            row.grid_columnconfigure(col, weight=1)
+            row.grid_columnconfigure(0, weight=1)
             text_col = ctk.CTkFrame(row, fg_color="transparent")
-            text_col.grid(row=0, column=col, rowspan=2, sticky="ew", padx=(6, 10), pady=8)
+            text_col.grid(row=0, column=0, sticky="ew", padx=(10, 10), pady=8)
             ctk.CTkLabel(text_col, text=item["name"], font=self.font_normal, anchor="w").pack(anchor="w")
             ctk.CTkLabel(text_col, text=item["url"], font=self.font_small, text_color="gray60",
                          anchor="w").pack(anchor="w")
-            ctk.CTkButton(row, text="Download", width=90, font=self.font_small,
-                          command=lambda u=item["url"]: self._download_single_scrape_result(u)).grid(
-                row=0, column=col + 1, rowspan=2, padx=4)
-            ctk.CTkButton(row, text="Copy", width=70, font=self.font_small, fg_color="gray40",
+            ctk.CTkButton(row, text="Queue", width=80, font=self.font_small,
+                          command=lambda it=item: self._us_queue([it])).grid(row=0, column=1, padx=4)
+            ctk.CTkButton(row, text="Copy", width=64, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
-                          command=lambda u=item["url"]: self._copy_url_to_clipboard(u)).grid(
-                row=0, column=col + 2, rowspan=2, padx=(0, 10))
+                          command=lambda u=item["url"]: self._us_copy(u)).grid(
+                row=0, column=2, rowspan=1, padx=(0, 10))
 
-    def _copy_url_to_clipboard(self, url):
+    def _us_copy(self, url):
         self.clipboard_clear()
         self.clipboard_append(url)
-        self.scrape_status_label.configure(text="Copied to clipboard.", text_color="#2fa84f")
+        self._us_status.configure(text="Copied to clipboard.", text_color="#2fa84f")
 
-    def _download_single_scrape_result(self, url):
-        items = [r for r in self._scrape_results if r["url"] == url]
-        self._queue_scrape_items_for_download(items)
-
-    def _download_selected_scrape_results(self):
-        selected = self.scrape_selector.selected_ids()
-        if not selected:
-            messagebox.showwarning("URL Scraping", "No URLs selected.")
-            return
-        items = [r for r in self._scrape_results if r["url"] in selected]
-        self._queue_scrape_items_for_download(items)
-
-    def _copy_selected_scrape_results(self):
-        selected = self.scrape_selector.selected_ids()
-        if not selected:
-            messagebox.showwarning("URL Scraping", "No URLs selected.")
-            return
-        items = [r for r in self._scrape_results if r["url"] in selected]
-        self.clipboard_clear()
-        self.clipboard_append("\n".join(i["url"] for i in items))
-        self.scrape_status_label.configure(text=f"Copied {len(items)} URL(s) to clipboard.", text_color="#2fa84f")
-
-    def _queue_scrape_items_for_download(self, items):
-        """Loads the given scraped item(s) into the Download tab, ready
-        to go - switching Video/Audio to match what's actually being
-        downloaded, and switching to Batch Queue (with URLs newline-
-        separated, ready for the batch parser) if more than one item is
-        involved, or Single Download with the fields pre-filled if
-        there's exactly one - per how this was asked for."""
+    def _us_queue(self, items):
+        """Load the given scraped video(s) into the Download tab: Single with
+        fields pre-filled for one, Batch Queue (newline-separated) for many."""
         if not items:
             return
-        from core.url_scraper import _classify
-        kinds = [_classify(i["url"]) for i in items]
+        kinds = [i.get("kind") for i in items]
         self.type_var.set("Audio" if kinds and all(k == "audio" for k in kinds) else "Video")
         self._on_type_change(self.type_var.get())
 
@@ -5681,8 +5594,8 @@ class App(*_APP_BASES):
             self.url_entry.insert(0, items[0]["url"])
             self.name_entry.delete(0, "end")
             self.name_entry.insert(0, sanitize_filename(beautify_title(items[0]["name"])))
-        self.scrape_status_label.configure(text=f"Loaded {len(items)} URL(s) into the Download tab.",
-                                            text_color="#2fa84f")
+        self._us_status.configure(text=f"Loaded {len(items)} video(s) into the Download tab.",
+                                  text_color="#2fa84f")
 
     def _build_more_information_subtab(self, tab):
         outer = ctk.CTkScrollableFrame(tab)

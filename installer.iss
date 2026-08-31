@@ -129,26 +129,8 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-; Downloads the actual Chromium browser Playwright needs for URL
-; Scraping to work at all - the playwright PACKAGE being bundled in
-; the .exe is not the same as the browser itself, which is a separate
-; download Playwright's own installer fetches. Without this step ever
-; running, URL Scraping fails immediately the first time anyone tries
-; it, with no obvious reason why - this is exactly that fix, run
-; automatically once, right after installation. Needs internet access
-; at install time; runs before the "launch the app now" step below so
-; scraping is ready to go from the very first launch. Shown (not
-; hidden) with its own status text since a several-hundred-MB browser
-; download can take a little while - a silent freeze here would look
-; like the installer hung.
-; runasoriginaluser: on an elevated (admin) install this step must run as the
-; actual signed-in user, so Playwright's browser lands in THAT user's
-; %APPDATA%\Media Downloader\playwright-browsers (where the app looks for it),
-; not the admin account's. The app itself hides the child console window and
-; verifies the browser is usable afterwards (see core/url_scraper.py).
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--playwright-install"; \
-    StatusMsg: "Downloading the browser component needed for URL Scraping..."; \
-    Flags: waituntilterminated runasoriginaluser
+; (1.7.3: the old --playwright-install step is gone. The page scraper now
+; uses yt-dlp's generic extractor - no bundled browser to download.)
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]

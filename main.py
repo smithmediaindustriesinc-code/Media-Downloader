@@ -14,17 +14,12 @@ if __name__ == "__main__":
         process_pending_queue()
         sys.exit(0)
 
-    # Run once, automatically, by installer.iss's [Run] section right
-    # after installation - downloads the actual Chromium browser
-    # Playwright needs (pip-installing the playwright PACKAGE alone
-    # never does this; it's a separate step) so URL Scraping works
-    # immediately, rather than silently failing to scrape the first
-    # time a user tries it with no clear explanation why.
+    # Kept as a harmless no-op: older installers still pass this flag on
+    # upgrade. The page scraper switched to yt-dlp's generic extractor in
+    # 1.7.3 and no longer needs a bundled browser.
     if "--playwright-install" in sys.argv:
-        from core.url_scraper import ensure_playwright_browser_installed
-        ok, message = ensure_playwright_browser_installed()
-        print(f"[playwright-install] {message}")
-        sys.exit(0 if ok else 1)
+        print("[playwright-install] Not needed - the page scraper no longer uses a browser.")
+        sys.exit(0)
 
     from gui.app import run
     run()
