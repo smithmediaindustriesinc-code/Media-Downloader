@@ -833,6 +833,12 @@ class App(*_APP_BASES):
         ctk.CTkLabel(spotify_row, text="  (or just paste a Spotify link in the box below)",
                      font=self.font_small, text_color="gray55").pack(side="left")
 
+        # F1 (1.7.4): quick-swap download presets
+        preset_row = ctk.CTkFrame(shared, fg_color="transparent")
+        preset_row.grid(row=6, column=0, columnspan=4, sticky="ew", padx=15, pady=(0, 8))
+        from gui.features_1_7_4 import build_preset_bar
+        build_preset_bar(self, preset_row).pack(side="left")
+
         self.inner_tabview = ctk.CTkTabview(outer, height=260,
                                             command=self._on_download_mode_change)
         self.inner_tabview.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
@@ -2122,6 +2128,8 @@ class App(*_APP_BASES):
         from gui.music_import import try_handle_download_spotify
         if try_handle_download_spotify(self, [url]) != "not_spotify":
             return
+        if not self._precheck_before_download([url]):  # 1.7.4 F7/F16
+            return
         # Name is no longer required - if left blank, _run_single fetches
         # the video's own title and uses that instead.
 
@@ -2290,9 +2298,17 @@ class App(*_APP_BASES):
                 )
             self._threadsafe_log(f"Done: {path}", color="green")
             self._threadsafe_progress(1.0, None)
+            _minfo = None
+            try:
+                if self.cfg.get("organize_apply_automatically"):
+                    _minfo = fetch_media_info(url)
+            except Exception:
+                pass
+            path = self._post_download_organize(path, _minfo, dtype, out_dir)  # F4
             self.last_downloaded_path = path
             update_item(request_id, url, status="success", path=path,
                         elapsed_seconds=self.downloader.elapsed_seconds())
+            update_entry(history_entry_id, path=path, bytes=self._downloaded_bytes())  # F11/F16
             self._notify_download_done(f"Downloaded \"{unique_name}\".")
             self.after(0, self._clear_download_inputs)  # #8 - it's in History now
         except DownloadCancelled:
@@ -2453,6 +2469,16 @@ class App(*_APP_BASES):
                     self._batch_current_url = None  # nothing downloading during the skip pause
                     continue
 
+            skip, why = self._eval_skip_rules(entry_url, entry_media_info)  # F6
+            if skip:
+                self._threadsafe_log(f"Skipped item {i}/{len(entry_urls)} - {why}.", color="blue")
+                update_item(request_id, entry_url, status="skipped")
+                update_entry(history_entry_id, status="Skipped (rule)")
+                self.after(0, self._refresh_history_tab)
+                self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                self._batch_current_url = None
+                continue
+
             status, path = "Success", ""
             update_entry(history_entry_id, status="In Progress")
             self.after(0, self._refresh_history_tab)
@@ -2479,9 +2505,12 @@ class App(*_APP_BASES):
                 self._threadsafe_log(f"Saved: {path}")
                 # No separate "add to playlist" step needed - path is
                 # already inside playlist_out_dir, which IS the playlist
-                # folder now that playlists are filesystem-based.
+                # folder now that playlists are filesystem-based. (F4 file
+                # organization deliberately does NOT run here - a playlist's
+                # files must stay in the playlist folder.)
                 update_item(request_id, entry_url, status="success", path=path,
                             elapsed_seconds=self.downloader.elapsed_seconds())
+                update_entry(history_entry_id, path=path, bytes=self._downloaded_bytes())  # F11/F16
             except DownloadCancelled:
                 self._threadsafe_log("Playlist download cancelled.")
                 removed, still_locked = cleanup_partial_files(playlist_out_dir, unique_name)
@@ -2698,6 +2727,138 @@ class App(*_APP_BASES):
                   f"Audio is a YouTube match - tags come from the source metadata.")
         self.start_batch_download()
 
+    def _precheck_before_download(self, urls):
+        """1.7.4 pre-flight gate. F16 monthly data budget + F7 repeat-URL
+        warning. Returns True to proceed, False to abort."""
+        try:
+            from core.download_gate import budget_state, repeat_url_entry
+            from core.download_stats import human_bytes
+        except Exception:
+            return True
+
+        over, used, cap = budget_state(self.cfg)
+        if over:
+            action = self.cfg.get("bandwidth_budget_action", "warn")
+            msg = (f"You've used {human_bytes(used)} of your {human_bytes(cap)} "
+                   f"monthly download budget.")
+            if action == "pause":
+                messagebox.showwarning("Data budget reached",
+                                       msg + "\n\nNew downloads are paused until next month "
+                                       "or until you raise the cap in Settings.")
+                return False
+            if not messagebox.askyesno("Data budget reached", msg + "\n\nDownload anyway?"):
+                return False
+
+        if self.cfg.get("warn_on_repeat_url", True) and len(urls) == 1:
+            prev = repeat_url_entry(urls[0])
+            if prev:
+                choice = messagebox.askyesnocancel(
+                    "Already downloaded",
+                    f"This URL was already downloaded on {prev.get('date', '?')} as "
+                    f"\"{prev.get('name', '?')}\".\n\n"
+                    f"Yes = download again   ·   No = open the existing file   ·   Cancel = stop")
+                if choice is None:
+                    return False
+                if choice is False:
+                    self._open_media_or_warn(prev.get("path", ""))
+                    return False
+        return True
+
+    # ---- F1 download presets ----------------------------------------- #
+    def _capture_preset(self):
+        """Current download settings as a flat dict for core.presets."""
+        return {
+            "download_type": self.type_var.get(),
+            "video_quality": self.cfg.get("video_quality", "Best"),
+            "video_format": self.cfg.get("video_format", "mp4"),
+            "aspect_ratio": self.aspect_var.get(),
+            "audio_quality": self.cfg.get("audio_quality", "192"),
+            "audio_format": self.cfg.get("audio_format", "mp3"),
+            "default_subtitles": bool(self.subtitles_var.get()),
+            "default_playlist": bool(self.playlist_var.get()),
+            "embed_thumbnail": self.cfg.get("embed_thumbnail", True),
+        }
+
+    def _apply_preset(self, name):
+        from core.presets import get_preset
+        p = get_preset(self.cfg, name)
+        if not p:
+            return
+        s = p["settings"]
+        if "video_quality" in s:
+            self.cfg["video_quality"] = s["video_quality"]
+        if "video_format" in s:
+            self.cfg["video_format"] = s["video_format"]
+        if "audio_quality" in s:
+            self.cfg["audio_quality"] = s["audio_quality"]
+        if "audio_format" in s:
+            self.cfg["audio_format"] = s["audio_format"]
+        if "embed_thumbnail" in s:
+            self.cfg["embed_thumbnail"] = s["embed_thumbnail"]
+        if "aspect_ratio" in s:
+            self.cfg["aspect_ratio"] = s["aspect_ratio"]
+            try: self.aspect_var.set(s["aspect_ratio"])
+            except Exception: pass
+        if "default_subtitles" in s:
+            self.cfg["default_subtitles"] = s["default_subtitles"]
+            try: self.subtitles_var.set(s["default_subtitles"])
+            except Exception: pass
+        if "default_playlist" in s:
+            self.cfg["default_playlist"] = s["default_playlist"]
+            try: self.playlist_var.set(s["default_playlist"])
+            except Exception: pass
+        if s.get("download_type") in ("Video", "Audio"):
+            try:
+                self.type_var.set(s["download_type"])
+                self._on_type_change(s["download_type"])
+            except Exception:
+                pass
+        # keep the Settings-tab widgets in sync if they've been built
+        for var_name, key in (("video_quality_var", "video_quality"),
+                              ("video_format_var", "video_format"),
+                              ("audio_quality_var", "audio_quality"),
+                              ("audio_format_var", "audio_format"),
+                              ("embed_thumb_var", "embed_thumbnail")):
+            v = getattr(self, var_name, None)
+            if v is not None and key in s:
+                try: v.set(s[key])
+                except Exception: pass
+        self.cfg["last_used_preset"] = name
+        save_config(self.cfg)
+        self._log(f"Applied preset \"{name}\".")
+
+    def _eval_skip_rules(self, url, media_info):
+        try:
+            from core.download_gate import should_skip
+            size = self._batch_size_by_url.get(url) if getattr(self, "_batch_size_by_url", None) else None
+            return should_skip(url, self.cfg, media_info=media_info, size_bytes=size)
+        except Exception as e:
+            log_error("eval_skip_rules", e)
+            return False, ""
+
+    def _downloaded_bytes(self):
+        try:
+            n = self.downloader.item_bytes_done() if self.downloader else 0
+            return int(n) if n and n > 0 else 0
+        except Exception:
+            return 0
+
+    def _post_download_organize(self, path, media_info, dtype, base_dir):
+        """F4: move a finished file per the organization rule. Returns the
+        (possibly new) path."""
+        try:
+            if not self.cfg.get("organize_apply_automatically", False):
+                return path
+            from core.file_organizer import organize_path
+            new_path = organize_path(base_dir or os.path.dirname(path), path,
+                                     self.cfg, media_info, dtype)
+            if new_path != path:
+                self._threadsafe_log(f"Organized -> {new_path}", color="blue")
+            return new_path
+        except Exception as e:
+            log_error("post_download_organize", e)
+            return path
+
     def _maybe_tag_music_track(self, url, path):
         """Post-download hook: if `url` came from a music import, write the
         TrackRef's tags (+ cover + lyrics) onto the downloaded file and record
@@ -2745,6 +2906,8 @@ class App(*_APP_BASES):
         # A Spotify link in the queue is rerouted through the Spotify importer.
         from gui.music_import import try_handle_download_spotify
         if try_handle_download_spotify(self, urls) != "not_spotify":
+            return
+        if not self._precheck_before_download(urls):  # 1.7.4 F7/F16
             return
 
         out_dir = self._resolve_output_dir()
@@ -2865,6 +3028,17 @@ class App(*_APP_BASES):
                             time.sleep(min(delay_s, 2))  # a short courtesy pause even on a skip, nothing more
                         continue
 
+                # F6: pre-download skip rules (duration / size / resolution / library).
+                skip, why = self._eval_skip_rules(url, media_info)
+                if skip:
+                    self._threadsafe_log(f"Skipped item {i}/{total} - {why}.", color="blue")
+                    update_item(request_id, url, status="skipped")
+                    update_entry(history_entry_id, status="Skipped (rule)")
+                    self.after(0, self._refresh_history_tab)
+                    self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
+                    self._batch_current_url = None
+                    continue
+
                 status, path = "Success", ""
                 update_entry(history_entry_id, status="In Progress")
                 self.after(0, self._refresh_history_tab)
@@ -2889,8 +3063,11 @@ class App(*_APP_BASES):
                             cookies_from_browser=self.cfg.get("cookies_from_browser", "none")
                         )
                     self._threadsafe_log(f"Saved: {path}")
+                    path = self._post_download_organize(path, media_info, dtype, out_dir)  # F4
+                    _bytes = self._downloaded_bytes()
                     update_item(request_id, url, status="success", path=path,
                                 elapsed_seconds=self.downloader.elapsed_seconds())
+                    update_entry(history_entry_id, path=path, bytes=_bytes)  # F11/F16
                     self._maybe_tag_music_track(url, path)
                 except DownloadCancelled:
                     self._threadsafe_log("Batch cancelled.")
@@ -3940,6 +4117,15 @@ class App(*_APP_BASES):
         ScrollableDropdown(filter_row, HISTORY_TYPE_FILTERS, self.history_type_var, font=self.font_small,
                             width=110, command=lambda _v: self._refresh_history_tab()).pack(side="left")
 
+        # F12 (1.7.4): filter by user tag
+        ctk.CTkLabel(filter_row, text="Tag:", font=self.font_small, text_color="gray60").pack(
+            side="left", padx=(8, 6))
+        self.history_tag_var = ctk.StringVar(value="All")
+        self._history_tag_menu = ctk.CTkOptionMenu(
+            filter_row, variable=self.history_tag_var, width=120, font=self.font_small,
+            values=["All"], command=lambda _v: self._refresh_history_tab())
+        self._history_tag_menu.pack(side="left")
+
         # Advanced Selecting - the app's one reusable multi-select
         # mechanism (see gui/advanced_select.py). Replaces the old
         # always-visible per-row Delete button: with selecting off,
@@ -4029,6 +4215,19 @@ class App(*_APP_BASES):
         if type_choice != "All":
             entries = [e for e in entries if e.get("type") == type_choice]
 
+        # F12: tag filter + keep the tag dropdown's options current
+        from core.history import all_tags as _all_tags
+        tags_in_use = _all_tags()
+        menu = getattr(self, "_history_tag_menu", None)
+        if menu is not None:
+            want = ["All"] + tags_in_use
+            if list(menu.cget("values")) != want:
+                menu.configure(values=want)
+        tag_choice = getattr(self, "history_tag_var", None)
+        tag_choice = tag_choice.get() if tag_choice else "All"
+        if tag_choice not in ("All", "") and tag_choice in tags_in_use:
+            entries = [e for e in entries if tag_choice in (e.get("tags") or [])]
+
         sort_choice = getattr(self, "history_sort_var", None)
         sort_choice = sort_choice.get() if sort_choice else "Newest first"
         # Sorting (not searching) skips a leading special character in
@@ -4068,9 +4267,9 @@ class App(*_APP_BASES):
         # final render inputs and skip the full teardown/rebuild if identical.
         sel_ids = (tuple(sorted(self.history_selector.selected_ids()))
                    if self.history_selector.enabled else ())
-        sig = (query, type_choice, sort_choice, self.history_selector.enabled, sel_ids,
+        sig = (query, type_choice, sort_choice, tag_choice, self.history_selector.enabled, sel_ids,
                tuple((e.get("id"), e.get("status"), e.get("name"), e.get("path"),
-                      e.get("date")) for e in entries))
+                      e.get("date"), tuple(e.get("tags") or ())) for e in entries))
         if (sig == getattr(self, "_history_render_sig", None)
                 and self.history_frame.winfo_children()):
             return
@@ -4112,22 +4311,28 @@ class App(*_APP_BASES):
             size_str = ""
             if path and os.path.isfile(path):
                 size_str = f" - {format_file_size(os.path.getsize(path))}"
-            subtitle = f"{entry.get('date', '')} - {status}{size_str}"
+            tags = entry.get("tags") or []
+            tag_str = ("   " + "  ".join(f"#{t}" for t in tags)) if tags else ""
+            subtitle = f"{entry.get('date', '')} - {status}{size_str}{tag_str}"
             ctk.CTkLabel(row, text=subtitle, font=self.font_small, anchor="w",
                          text_color=status_colors.get(status, "gray60")).grid(
                 row=1, column=col, sticky="ew", padx=10, pady=(0, 8))
             folder = os.path.dirname(path) or ""
+            ctk.CTkButton(row, text="Tag", width=48, font=self.font_small,
+                          fg_color="gray40", hover_color="gray30",
+                          command=lambda e=entry: self._edit_history_tags(e)).grid(
+                row=0, column=col + 1, rowspan=2, padx=(0, 6))
             ctk.CTkButton(row, text="Open folder", width=100, font=self.font_small,
-                          command=lambda f=folder: self._open_or_warn(f)).grid(row=0, column=col + 1, rowspan=2, padx=6)
+                          command=lambda f=folder: self._open_or_warn(f)).grid(row=0, column=col + 2, rowspan=2, padx=6)
             ctk.CTkButton(row, text="Open file", width=75, font=self.font_small,
                           fg_color="gray40", hover_color="gray30",
                           command=lambda p=path: self._open_media_or_warn(p)).grid(
-                row=0, column=col + 2, rowspan=2, padx=(0, 6))
+                row=0, column=col + 3, rowspan=2, padx=(0, 6))
             _del = ctk.CTkButton(row, text="Delete", width=70, font=self.font_small,
                                  fg_color="#a13333", hover_color="#7d2626")
             _del.configure(command=lambda b=_del, eid=entry.get("id"):
                            self._arm_delete(b, lambda: self._delete_history_entry(eid)))
-            _del.grid(row=0, column=col + 3, rowspan=2, padx=(0, 10))
+            _del.grid(row=0, column=col + 4, rowspan=2, padx=(0, 10))
 
     def _open_or_warn(self, folder):
         if not open_folder(folder):
@@ -4136,6 +4341,19 @@ class App(*_APP_BASES):
     def _delete_history_entry(self, entry_id):
         if entry_id is not None:
             delete_entry(entry_id)
+        self._refresh_history_tab()
+
+    def _edit_history_tags(self, entry):
+        """F12: edit an entry's tags via a small comma-separated prompt."""
+        from tkinter import simpledialog
+        from core.history import set_tags
+        current = ", ".join(entry.get("tags") or [])
+        val = simpledialog.askstring(
+            "Tags", f"Tags for \"{entry.get('name', '')}\" (comma-separated):",
+            initialvalue=current, parent=self)
+        if val is None:
+            return
+        set_tags(entry.get("id"), [t.strip() for t in val.split(",")])
         self._refresh_history_tab()
 
     def _clear_history_clicked(self):
@@ -4460,6 +4678,13 @@ class App(*_APP_BASES):
         self._sub_header(scroll, "Import from Spotify")
         from gui.music_import import build_spotify_settings_section
         build_spotify_settings_section(self, scroll).pack(fill="x", padx=5, pady=(0, 15))
+
+        # ============================================================ #
+        # DOWNLOAD BEHAVIOUR (1.7.4 feature batch)
+        # ============================================================ #
+        self._section_header(scroll, "Download behaviour")
+        from gui.features_1_7_4 import build_download_behaviour_section
+        build_download_behaviour_section(self, scroll).pack(fill="x", padx=5, pady=(0, 15))
 
         # ============================================================ #
         # ACCESSIBILITY

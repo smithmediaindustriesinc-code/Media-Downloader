@@ -25,6 +25,39 @@ def set_rate_limit(bytes_per_sec):
 def _ratelimit_options():
     return {"ratelimit": _RATE_LIMIT_BPS} if _RATE_LIMIT_BPS > 0 else {}
 
+
+# F15 (1.7.4): content-aware quality rules. When set, download_video picks the
+# quality from the video's duration instead of the fixed default. Rules are
+# [{"max_minutes": int|None, "quality": "<VIDEO_QUALITY_MAP key>"}], first
+# rule whose cap covers the duration wins; None cap = "everything longer".
+_QUALITY_RULES = []
+
+
+def set_quality_rules(rules):
+    global _QUALITY_RULES
+    cleaned = []
+    for r in (rules or []):
+        try:
+            q = r.get("quality")
+            if q not in VIDEO_QUALITY_MAP:
+                continue
+            mm = r.get("max_minutes")
+            mm = None if mm in (None, "", 0) else int(mm)
+            cleaned.append({"max_minutes": mm, "quality": q})
+        except (AttributeError, TypeError, ValueError):
+            continue
+    cleaned.sort(key=lambda r: (r["max_minutes"] is None, r["max_minutes"] or 0))
+    _QUALITY_RULES = cleaned
+
+
+def _quality_for_duration(default_key, duration_s):
+    if not _QUALITY_RULES or not duration_s:
+        return default_key
+    for r in _QUALITY_RULES:
+        if r["max_minutes"] is None or duration_s <= r["max_minutes"] * 60:
+            return r["quality"]
+    return default_key
+
 VIDEO_QUALITY_MAP = {
     "Best": "bestvideo+bestaudio/best",
     "4K / 2160p": "bestvideo[height<=2160]+bestaudio/best[height<=2160]",
@@ -654,6 +687,19 @@ class Downloader:
         self._item_prev_streams_bytes = 0
         os_safe_dir = out_dir.rstrip("/\\")
         outtmpl = f"{os_safe_dir}/{name}.%(ext)s"
+
+        # F15: let a duration-based rule override the requested quality.
+        if _QUALITY_RULES:
+            dur = (prefetched_info or {}).get("duration")
+            if not dur:
+                try:
+                    dur = fetch_media_info(url).get("duration")
+                except Exception:
+                    dur = None
+            resolved = _quality_for_duration(quality_key, dur)
+            if resolved != quality_key:
+                self._log(f"Quality rule: {int((dur or 0) / 60)} min video -> {resolved}")
+                quality_key = resolved
 
         try:
             fmt_selector = _format_for_aspect_ratio(url, quality_key, aspect_ratio, info=prefetched_info)

@@ -178,6 +178,41 @@ def delete_entry(entry_id):
         return removed
 
 
+def set_tags(entry_id, tags):
+    """F12 (1.7.4): replace an entry's free-form tag list. Tags are trimmed,
+    de-duped (case-insensitive), empty ones dropped."""
+    if entry_id is None:
+        return False
+    seen, clean = set(), []
+    for t in tags or []:
+        t = str(t).strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            clean.append(t)
+    with _lock:
+        _ensure_loaded()
+        for entry in _cache:
+            if entry.get("id") == entry_id:
+                if clean:
+                    entry["tags"] = clean
+                else:
+                    entry.pop("tags", None)
+                _write_now()
+                return True
+    return False
+
+
+def all_tags():
+    """Every distinct tag currently in use, sorted."""
+    with _lock:
+        _ensure_loaded()
+        seen = {}
+        for e in _cache:
+            for t in e.get("tags") or []:
+                seen.setdefault(t.lower(), t)
+    return [seen[k] for k in sorted(seen)]
+
+
 def clear_history():
     global _cache, _deleted_ids, _last_written_mtime
     with _lock:
