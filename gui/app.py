@@ -2452,13 +2452,16 @@ class App(*_APP_BASES):
                     self.after(0, lambda: self._set_downloading_state(False))
                     return
                 if ans:
-                    info["entries"] = fresh or []
                     if not fresh:
-                        self._threadsafe_log("Playlist is already fully synced - nothing new.", color="blue")
+                        self._threadsafe_log("Playlist is already fully synced - nothing new to download.",
+                                             color="blue")
+                        self.after(0, lambda: self._set_downloading_state(False))
+                        return
+                    info["entries"] = fresh
         except Exception as e:
             log_error("playlist_sync_prompt", e)
 
-        entry_urls = [e["url"] for e in info["entries"]] or ([url] if not info.get("entries") else [])
+        entry_urls = [e["url"] for e in info["entries"]] or [url]
         entry_titles = {e["url"]: e.get("title") for e in info["entries"]}
         self._playlist_sync_url = url
         self._playlist_sync_entries = all_entries
@@ -2467,11 +2470,6 @@ class App(*_APP_BASES):
             self._threadsafe_log(
                 f"Heads up: the playlist lookup didn't fully finish - only the first "
                 f"{len(entry_urls)} item(s) were read and will be downloaded.", color="red")
-        if not entry_urls:
-            finish_request(start_request(dtype, "playlist", [url], out_dir=playlist_out_dir))
-            self.after(0, lambda: self._set_downloading_state(False))
-            self.after(0, self._refresh_requests_tab)
-            return
         request_id = start_request(dtype, "playlist", entry_urls, out_dir=playlist_out_dir)
 
         delay_s = max(0, self.cfg.get("batch_delay_seconds", 0))
