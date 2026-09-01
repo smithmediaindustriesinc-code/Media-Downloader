@@ -8,6 +8,23 @@ import yt_dlp
 from core.dependencies import check_ffmpeg, FFMPEG_DIR
 from core.speed_tracker import SpeedTracker
 
+# F2 (1.7.4): global download rate cap in bytes/sec (0 = unlimited). The GUI
+# sets this at startup and whenever the "Speed limit" setting changes; every
+# yt-dlp download call folds it in via _ratelimit_options().
+_RATE_LIMIT_BPS = 0
+
+
+def set_rate_limit(bytes_per_sec):
+    global _RATE_LIMIT_BPS
+    try:
+        _RATE_LIMIT_BPS = max(0, int(bytes_per_sec or 0))
+    except (TypeError, ValueError):
+        _RATE_LIMIT_BPS = 0
+
+
+def _ratelimit_options():
+    return {"ratelimit": _RATE_LIMIT_BPS} if _RATE_LIMIT_BPS > 0 else {}
+
 VIDEO_QUALITY_MAP = {
     "Best": "bestvideo+bestaudio/best",
     "4K / 2160p": "bestvideo[height<=2160]+bestaudio/best[height<=2160]",
@@ -661,6 +678,7 @@ class Downloader:
         }
         options.update(_ffmpeg_options())
         options.update(_cookie_options(cookies_from_browser))
+        options.update(_ratelimit_options())
         if subtitles:
             options["writesubtitles"] = True
             options["writeautomaticsub"] = True
@@ -721,6 +739,7 @@ class Downloader:
         }
         options.update(_ffmpeg_options())
         options.update(_cookie_options(cookies_from_browser))
+        options.update(_ratelimit_options())
         if embed_thumbnail:
             postprocessors.append({"key": "FFmpegMetadata"})
             # Only pull the thumbnail down at all when we can actually embed it

@@ -1,6 +1,14 @@
+import copy
 import json
 import os
 from core.paths import app_dir
+
+
+def _fresh_defaults():
+    """A deep copy of DEFAULT_CONFIG - never hand out the module-level dict's
+    own mutable list/dict values, or code that appends to e.g.
+    cfg['download_presets'] would corrupt the defaults for the whole process."""
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 CONFIG_PATH = os.path.join(app_dir(), "options", "config.json")
 
@@ -172,6 +180,59 @@ DEFAULT_CONFIG = {
                             # on to grab the music video instead, in which case
                             # the normal video quality / aspect / subtitle
                             # settings apply.
+
+    # ================= 1.7.4 feature batch =================
+    # F1 Download presets - named bundles of download settings. Stored as a
+    # list of {name, settings:{...}} dicts; see core/presets.py.
+    "download_presets": [],
+    "last_used_preset": "",
+
+    # F2 Speed limiter - cap yt-dlp's download rate. 0 = unlimited.
+    "speed_limit_enabled": False,
+    "speed_limit_kbps": 0,
+
+    # F15 Content-aware quality rules - when on, pick video quality from the
+    # video's duration instead of the fixed default. List of
+    # {max_minutes:int|null, quality:str}, first match wins, sorted ascending.
+    "quality_rules_enabled": False,
+    "quality_rules": [],   # e.g. [{"max_minutes": 5, "quality": "480p"}, {"max_minutes": null, "quality": "1080p"}]
+
+    # F6 Pre-download skip rules - evaluated per item before it starts.
+    "skip_rules_enabled": False,
+    "skip_shorter_than_s": 0,      # 0 = off
+    "skip_longer_than_s": 0,       # 0 = off
+    "skip_larger_than_mb": 0,      # 0 = off (needs batch_prefetch_sizes for size)
+    "skip_min_height": 0,          # 0 = off (video only)
+    "skip_if_in_library": False,
+
+    # F7 Warn before re-downloading a URL already in History / Library.
+    "warn_on_repeat_url": True,
+
+    # F4 Post-download file organization. mode: off | by_source | by_date |
+    # by_resolution | pattern. pattern uses {source}/{date}/{title}/{ext}/{height}.
+    "organize_mode": "off",
+    "organize_pattern": "{source}/{date}",
+    "organize_apply_automatically": False,
+
+    # F13 Manual tag templates - list of {name, artist, album, album_artist,
+    # genre, year, comment}. Applied in bulk from Library/Playlists.
+    "tag_templates": [],
+
+    # F8 richer failure diagnostics has no config (always on).
+
+    # F16 Monthly bandwidth budget (GiB). 0 = off. action: warn | pause.
+    "bandwidth_budget_gb": 0,
+    "bandwidth_budget_action": "warn",
+
+    # F5 Scheduled downloads - remembers the last scheduled time text.
+    "last_scheduled_time": "",
+
+    # F9 Channel/playlist auto-monitor subscriptions. Each:
+    # {id, url, name, last_check_iso, seen_ids:[...], auto_download:bool,
+    #  dtype:"Video"|"Audio", out_dir:str}
+    "monitor_subscriptions": [],
+    "monitor_check_interval_min": 360,
+    "monitor_enabled": False,
 }
 
 
@@ -216,12 +277,12 @@ def load_config():
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            cfg = DEFAULT_CONFIG.copy()
+            cfg = _fresh_defaults()
             cfg.update(data)
             return _run_migrations(cfg)
         except Exception:
             pass
-    return DEFAULT_CONFIG.copy()
+    return _fresh_defaults()
 
 
 def save_config(cfg):
@@ -313,7 +374,7 @@ def merge_imported_config(imported):
                        "treated as a plain settings file.")
         flat = imported
 
-    merged = DEFAULT_CONFIG.copy()
+    merged = _fresh_defaults()
     missing = [k for k in DEFAULT_CONFIG if k not in flat]
     unknown = [k for k in flat if k not in DEFAULT_CONFIG]
     type_mismatches = []

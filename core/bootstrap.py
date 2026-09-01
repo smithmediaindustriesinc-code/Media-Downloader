@@ -61,3 +61,14 @@ def bootstrap():
         mark("slider mousewheel disabled")
     except Exception as e:
         mark(f"slider mousewheel patch failed (non-fatal): {e}")
+
+    # F2 (1.7.4): apply the saved download speed cap before any download runs.
+    try:
+        from core.downloader import set_rate_limit
+        from core.config import load_config
+        _cfg = load_config()
+        set_rate_limit(_cfg.get("speed_limit_kbps", 0) * 1024
+                       if _cfg.get("speed_limit_enabled") else 0)
+        mark("download speed limit applied from saved settings")
+    except Exception as e:
+        mark(f"speed limit setting failed (non-fatal): {e}")
