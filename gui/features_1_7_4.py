@@ -464,3 +464,95 @@ def build_download_behaviour_section(app, parent):
     ctk.CTkLabel(box, text="", height=6).grid(row=row[0], column=0); row[0] += 1
 
     return box
+
+
+# --------------------------------------------------------------------------- #
+# F9: channel / playlist auto-monitor (Settings)
+# --------------------------------------------------------------------------- #
+def build_monitor_section(app, parent):
+    from core import monitor as _monitor
+
+    box = ctk.CTkFrame(parent)
+    box.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(box, text="Watch a channel or playlist for new uploads and download them "
+                 "automatically (or just get notified). Checked periodically and on startup.",
+                 font=app.font_small, text_color="gray60", wraplength=680, justify="left").grid(
+        row=0, column=0, sticky="w", padx=12, pady=(10, 6))
+
+    enabled = ctk.BooleanVar(value=app.cfg.get("monitor_enabled", False))
+    interval = ctk.StringVar(value=str(app.cfg.get("monitor_check_interval_min", 360)))
+
+    def on_settings_change(*_):
+        app.cfg["monitor_enabled"] = bool(enabled.get())
+        try:
+            app.cfg["monitor_check_interval_min"] = max(15, int(interval.get() or 360))
+        except ValueError:
+            app.cfg["monitor_check_interval_min"] = 360
+        save_config(app.cfg)
+
+    top = ctk.CTkFrame(box, fg_color="transparent")
+    top.grid(row=1, column=0, sticky="ew", padx=12, pady=2)
+    ctk.CTkSwitch(top, text="Enable monitoring", font=app.font_normal, variable=enabled,
+                  command=on_settings_change).pack(side="left")
+    ctk.CTkLabel(top, text="  check every", font=app.font_normal).pack(side="left", padx=(10, 4))
+    ie = ctk.CTkEntry(top, width=70, textvariable=interval, font=app.font_normal)
+    ie.pack(side="left")
+    ie.bind("<FocusOut>", on_settings_change)
+    ie.bind("<Return>", on_settings_change)
+    ctk.CTkLabel(top, text="min", font=app.font_small).pack(side="left", padx=4)
+
+    subs_frame = ctk.CTkFrame(box, fg_color="transparent")
+    subs_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(6, 4))
+
+    def render_subs():
+        for w in subs_frame.winfo_children():
+            w.destroy()
+        subs = app.cfg.get("monitor_subscriptions") or []
+        if not subs:
+            ctk.CTkLabel(subs_frame, text="No subscriptions yet.", font=app.font_small,
+                         text_color="gray55").pack(anchor="w")
+        for sub in subs:
+            r = ctk.CTkFrame(subs_frame, fg_color=("gray92", "gray16"))
+            r.pack(fill="x", pady=2)
+            last = (sub.get("last_check_iso") or "")[:16].replace("T", " ") or "never"
+            ctk.CTkLabel(r, text=f"{sub.get('name', '?')[:40]}   ({sub.get('dtype', 'Video')}, "
+                         f"last check {last})", font=app.font_small, anchor="w").pack(
+                side="left", padx=8, pady=4, fill="x", expand=True)
+            adl = ctk.BooleanVar(value=sub.get("auto_download", False))
+            ctk.CTkCheckBox(r, text="auto", font=app.font_small, width=20, variable=adl,
+                            command=lambda s=sub, v=adl: (s.__setitem__("auto_download", bool(v.get())),
+                                                          save_config(app.cfg))).pack(side="left", padx=6)
+            ctk.CTkButton(r, text="Check now", width=80, font=app.font_small, fg_color="gray40",
+                          hover_color="gray30",
+                          command=lambda s=sub: app._check_subscription_now(s)).pack(side="left", padx=4)
+            ctk.CTkButton(r, text="✕", width=26, font=app.font_small, fg_color="gray40",
+                          hover_color="gray30",
+                          command=lambda sid=sub["id"]: (
+                              app.cfg.__setitem__("monitor_subscriptions",
+                                                  [x for x in app.cfg["monitor_subscriptions"] if x["id"] != sid]),
+                              save_config(app.cfg), render_subs())).pack(side="left", padx=(4, 8))
+
+    add = ctk.CTkFrame(box, fg_color="transparent")
+    add.grid(row=3, column=0, sticky="ew", padx=12, pady=(4, 10))
+    url_v = ctk.StringVar()
+    dt_v = ctk.StringVar(value="Video")
+    ctk.CTkEntry(add, textvariable=url_v, font=app.font_small,
+                 placeholder_text="channel / playlist URL").pack(side="left", fill="x", expand=True)
+    ctk.CTkOptionMenu(add, values=["Video", "Audio"], variable=dt_v, width=90,
+                      font=app.font_small).pack(side="left", padx=6)
+
+    def add_sub():
+        u = url_v.get().strip()
+        if not u:
+            return
+        subs = app.cfg.get("monitor_subscriptions") or []
+        subs.append(_monitor.make_subscription(u, dtype=dt_v.get()))
+        app.cfg["monitor_subscriptions"] = subs
+        save_config(app.cfg)
+        url_v.set("")
+        render_subs()
+    ctk.CTkButton(add, text="Add", width=60, font=app.font_small, command=add_sub).pack(side="left")
+
+    app._render_monitor_subs = render_subs
+    render_subs()
+    return box

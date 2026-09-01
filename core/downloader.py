@@ -385,7 +385,8 @@ def fetch_playlist_info(url, timeout_seconds=60, cancel_event=None):
         raise PlaylistFetchCancelled("Playlist lookup was cancelled.")
 
     entry_list = [{"title": (e.get("title") or "Untitled"),
-                   "url": (e.get("url") or e.get("webpage_url") or url)}
+                   "url": (e.get("url") or e.get("webpage_url") or url),
+                   "id": (e.get("id") or e.get("url") or "")}
                   for e in collected if e]
     playlist_title = meta.get("title")
     if not playlist_title and entry_list:

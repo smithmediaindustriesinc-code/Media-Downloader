@@ -224,8 +224,11 @@ DEFAULT_CONFIG = {
     "bandwidth_budget_gb": 0,
     "bandwidth_budget_action": "warn",
 
-    # F5 Scheduled downloads - remembers the last scheduled time text.
+    # F5 Scheduled downloads. last_scheduled_time = the text last typed.
+    # scheduled_queue = a pending run: {"urls":[...], "at": epoch_seconds,
+    # "dtype": "Video"|"Audio", "custom_name": str} or None. Survives a close.
     "last_scheduled_time": "",
+    "scheduled_queue": None,
 
     # F9 Channel/playlist auto-monitor subscriptions. Each:
     # {id, url, name, last_check_iso, seen_ids:[...], auto_download:bool,

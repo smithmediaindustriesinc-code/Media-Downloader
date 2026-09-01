@@ -311,6 +311,8 @@ class App(*_APP_BASES):
         # actually takes here). Runs at most twice.
         self._geometry_finalized = 0
         self.after(120, self._finalize_launch_geometry)
+        self.after(2500, self._start_scheduled_queue_tick)  # F5: resume a pending scheduled queue
+        self.after(3000, self._start_monitor_tick)  # F9: channel/playlist monitor
 
     def _finalize_launch_geometry(self):
         try:
@@ -1097,8 +1099,16 @@ class App(*_APP_BASES):
                                               fg_color="gray40", hover_color="gray30",
                                               command=self._clear_batch_queue)
         self.batch_clear_btn.pack(side="left", padx=(10, 0))
+        # F5 (1.7.4): schedule the queue for later instead of starting now
+        self.batch_schedule_btn = ctk.CTkButton(btn_row, text="Schedule…", width=100, font=self.font_normal,
+                                                fg_color="gray40", hover_color="gray30",
+                                                command=self._schedule_queue_clicked)
+        self.batch_schedule_btn.pack(side="left", padx=(10, 0))
         self.batch_status_label = ctk.CTkLabel(tab, text="", font=self.font_small, anchor="w")
         self.batch_status_label.grid(row=4, column=0, sticky="w", padx=5, pady=(0, 4))
+        self.batch_schedule_label = ctk.CTkLabel(tab, text="", font=self.font_small, anchor="w",
+                                                 text_color="#d68910")
+        self.batch_schedule_label.grid(row=5, column=0, sticky="w", padx=5, pady=(0, 4))
         self.batch_box.bind("<KeyRelease>", self._update_batch_start_btn)
         self._apply_batch_queue_mode()
         self._update_batch_start_btn()
@@ -2402,12 +2412,46 @@ class App(*_APP_BASES):
         self._threadsafe_log(f"Created playlist '{playlist_name}' - downloading {len(info['entries']) or 1} item(s) into it.")
         self.after(0, self._refresh_playlists_tab)
 
-        entry_urls = [e["url"] for e in info["entries"]] or [url]
+        all_entries = list(info["entries"])
+        # F10: incremental sync - if this playlist URL was fetched before, offer
+        # to grab only the new entries.
+        try:
+            from core import playlist_sync
+            if playlist_sync.is_known(url):
+                fresh = playlist_sync.new_entries(url, all_entries)
+                rec = playlist_sync.get_record(url) or {}
+                ans = self._ask_on_main(
+                    "Playlist already synced",
+                    f"You've synced this playlist before "
+                    f"({rec.get('count', '?')} tracks, last {str(rec.get('last', ''))[:10]}).\n\n"
+                    f"{len(fresh)} new item(s) since then.\n\n"
+                    f"Yes = download only the new items   ·   No = download everything again",
+                    kind="yesnocancel")
+                if ans is None:
+                    self._threadsafe_log("Playlist download cancelled.")
+                    self.after(0, lambda: self._set_downloading_state(False))
+                    return
+                if ans:
+                    info["entries"] = fresh or []
+                    if not fresh:
+                        self._threadsafe_log("Playlist is already fully synced - nothing new.", color="blue")
+        except Exception as e:
+            log_error("playlist_sync_prompt", e)
+
+        entry_urls = [e["url"] for e in info["entries"]] or ([url] if not info.get("entries") else [])
         entry_titles = {e["url"]: e.get("title") for e in info["entries"]}
+        self._playlist_sync_url = url
+        self._playlist_sync_entries = all_entries
+        self._playlist_sync_title = info.get("playlist_title", "")
         if info.get("partial"):
             self._threadsafe_log(
                 f"Heads up: the playlist lookup didn't fully finish - only the first "
                 f"{len(entry_urls)} item(s) were read and will be downloaded.", color="red")
+        if not entry_urls:
+            finish_request(start_request(dtype, "playlist", [url], out_dir=playlist_out_dir))
+            self.after(0, lambda: self._set_downloading_state(False))
+            self.after(0, self._refresh_requests_tab)
+            return
         request_id = start_request(dtype, "playlist", entry_urls, out_dir=playlist_out_dir)
 
         delay_s = max(0, self.cfg.get("batch_delay_seconds", 0))
@@ -2576,6 +2620,15 @@ class App(*_APP_BASES):
 
         self._batch_current_url = None
         finish_request(request_id)
+        # F10: remember every entry we saw so a later "sync" only grabs new ones.
+        try:
+            if not self._cancel_requested and getattr(self, "_playlist_sync_url", None):
+                from core import playlist_sync
+                playlist_sync.record(self._playlist_sync_url,
+                                     getattr(self, "_playlist_sync_entries", []),
+                                     getattr(self, "_playlist_sync_title", ""))
+        except Exception as e:
+            log_error("playlist_sync_record", e)
         self._threadsafe_log("Playlist download finished.", color="green")
         self.after(0, lambda: self._set_downloading_state(False))
         self.after(0, self._refresh_history_tab)
@@ -2737,6 +2790,201 @@ class App(*_APP_BASES):
         self._log(f"Music import: queued {len(urls)} track(s) from \"{session.name}\". "
                   f"Audio is a YouTube match - tags come from the source metadata.")
         self.start_batch_download()
+
+    # ---- F5 scheduled downloads ------------------------------------- #
+    def _parse_schedule_time(self, text):
+        """'14:30' / '+90m' / '+2h' / '2026-09-02 02:00' -> epoch seconds, or None."""
+        import re as _re
+        t = (text or "").strip().lower()
+        now = time.time()
+        m = _re.fullmatch(r"\+?\s*(\d+)\s*([mh])", t)
+        if m:
+            n = int(m.group(1))
+            return now + n * (3600 if m.group(2) == "h" else 60)
+        for fmt in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"):
+            try:
+                return time.mktime(time.strptime(text.strip(), fmt))
+            except ValueError:
+                pass
+        m = _re.fullmatch(r"(\d{1,2}):(\d{2})", t)
+        if m:
+            hh, mm = int(m.group(1)), int(m.group(2))
+            lt = time.localtime(now)
+            target = time.struct_time((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0,
+                                       lt.tm_wday, lt.tm_yday, -1))
+            ts = time.mktime(target)
+            if ts <= now:
+                ts += 86400  # that time already passed today -> tomorrow
+            return ts
+        return None
+
+    def _schedule_queue_clicked(self):
+        if self.cfg.get("dynamic_batch_queue_enabled", False):
+            urls = list(self._batch_urls)
+        else:
+            raw = self.batch_box.get("1.0", "end").strip()
+            urls = [u.strip() for u in raw.splitlines() if u.strip()]
+        if not urls:
+            messagebox.showwarning("Schedule queue", "Add at least one URL first.")
+            return
+        from tkinter import simpledialog
+        default = self.cfg.get("last_scheduled_time", "") or "02:00"
+        text = simpledialog.askstring(
+            "Schedule queue",
+            "Start this queue at (24h HH:MM, or +90m / +2h, or YYYY-MM-DD HH:MM):",
+            initialvalue=default, parent=self)
+        if not text:
+            return
+        at = self._parse_schedule_time(text)
+        if not at:
+            messagebox.showerror("Schedule queue", "Couldn't read that time.")
+            return
+        self.cfg["last_scheduled_time"] = text.strip()
+        self.cfg["scheduled_queue"] = {
+            "urls": urls, "at": at, "dtype": self.type_var.get(),
+            "custom_name": self.queue_name_entry.get().strip() or None,
+        }
+        save_config(self.cfg)
+        self._start_scheduled_queue_tick()
+
+    def _cancel_scheduled_queue(self):
+        self.cfg["scheduled_queue"] = None
+        save_config(self.cfg)
+        if hasattr(self, "batch_schedule_label"):
+            self.batch_schedule_label.configure(text="")
+
+    def _start_scheduled_queue_tick(self):
+        sq = self.cfg.get("scheduled_queue")
+        if not sq:
+            if hasattr(self, "batch_schedule_label"):
+                self.batch_schedule_label.configure(text="")
+            return
+        remaining = sq["at"] - time.time()
+        if remaining <= 0:
+            urls = sq.get("urls") or []
+            self._cancel_scheduled_queue()
+            if urls and not self.batch_running:
+                self._log(f"Scheduled queue starting now ({len(urls)} item(s)).")
+                self.type_var.set(sq.get("dtype", "Video"))
+                try:
+                    self._on_type_change(self.type_var.get())
+                except Exception:
+                    pass
+                if self.cfg.get("dynamic_batch_queue_enabled", False):
+                    self._batch_urls = list(urls)
+                    self._refresh_batch_dynamic_list()
+                else:
+                    self.batch_box.delete("1.0", "end")
+                    self.batch_box.insert("1.0", "\n".join(urls))
+                self.tabview.set("Download")
+                self.inner_tabview.set("Batch Queue")
+                self.start_batch_download()
+            return
+        mins = int(remaining // 60)
+        when = time.strftime("%H:%M", time.localtime(sq["at"]))
+        if hasattr(self, "batch_schedule_label"):
+            self.batch_schedule_label.configure(
+                text=f"⏰ Queue scheduled for {when}  (~{mins} min)   —   click to cancel")
+            self.batch_schedule_label.bind("<Button-1>", lambda e: self._cancel_scheduled_queue())
+        self.after(20000, self._start_scheduled_queue_tick)
+
+    # ---- F9 channel / playlist monitor ----------------------------- #
+    def _start_monitor_tick(self):
+        interval_min = max(15, int(self.cfg.get("monitor_check_interval_min", 360) or 360))
+        # first sweep shortly after launch, then on the interval
+        self.after(45000, self._monitor_sweep)
+        self._monitor_after_id = self.after(interval_min * 60000, self._monitor_tick_loop)
+
+    def _monitor_tick_loop(self):
+        self._monitor_sweep()
+        interval_min = max(15, int(self.cfg.get("monitor_check_interval_min", 360) or 360))
+        self._monitor_after_id = self.after(interval_min * 60000, self._monitor_tick_loop)
+
+    def _monitor_sweep(self):
+        if not self.cfg.get("monitor_enabled") or self.batch_running:
+            return
+        subs = list(self.cfg.get("monitor_subscriptions") or [])
+        if subs:
+            threading.Thread(target=self._monitor_worker, args=(subs,), daemon=True).start()
+
+    def _check_subscription_now(self, sub):
+        self._log(f"Checking subscription: {sub.get('name', sub.get('url'))}")
+        threading.Thread(target=self._monitor_worker, args=([sub],), daemon=True).start()
+
+    def _monitor_worker(self, subs):
+        from core import monitor
+        queued_urls = []
+        for sub in subs:
+            try:
+                new, err = monitor.check_subscription(sub)
+            except Exception as e:
+                self._threadsafe_log(f"Monitor check failed for {sub.get('name')}: {e}", color="red")
+                continue
+            self.after(0, lambda: save_config(self.cfg))  # persist seen_ids/last_check
+            if err:
+                self._threadsafe_log(f"Monitor: {sub.get('name')} - {err}", color="red")
+                continue
+            if not new:
+                continue
+            self._threadsafe_log(f"Monitor: {len(new)} new item(s) in \"{sub.get('name')}\".",
+                                 color="green")
+            if sub.get("auto_download"):
+                queued_urls.extend((sub.get("dtype", "Video"), e["url"]) for e in new)
+            else:
+                self.after(0, lambda n=new, s=sub: self._monitor_prompt(s, n))
+        if queued_urls:
+            self.after(0, lambda: self._monitor_autoqueue(queued_urls))
+
+    def _monitor_autoqueue(self, dtype_urls):
+        if self.batch_running:
+            self._log("Monitor: a batch is running - new items will queue next check.")
+            return
+        # group by dtype; if mixed, prefer the majority and note it
+        vids = [u for d, u in dtype_urls if d == "Video"]
+        auds = [u for d, u in dtype_urls if d == "Audio"]
+        urls = vids or auds
+        self.type_var.set("Video" if vids else "Audio")
+        try:
+            self._on_type_change(self.type_var.get())
+        except Exception:
+            pass
+        if self.cfg.get("dynamic_batch_queue_enabled", False):
+            self._batch_urls = list(urls)
+            self._refresh_batch_dynamic_list()
+        else:
+            self.batch_box.delete("1.0", "end")
+            self.batch_box.insert("1.0", "\n".join(urls))
+        self.tabview.set("Download")
+        self.inner_tabview.set("Batch Queue")
+        self._log(f"Monitor: queued {len(urls)} new item(s) - starting.")
+        self.start_batch_download()
+
+    def _monitor_prompt(self, sub, new):
+        if messagebox.askyesno(
+                "New uploads",
+                f"\"{sub.get('name')}\" has {len(new)} new item(s):\n\n" +
+                "\n".join(f"• {e.get('title', e['url'])[:60]}" for e in new[:8]) +
+                ("\n…" if len(new) > 8 else "") +
+                "\n\nAdd them to the download queue?"):
+            self._monitor_autoqueue([(sub.get("dtype", "Video"), e["url"]) for e in new])
+
+    def _ask_on_main(self, title, message, kind="yesno"):
+        """Show a messagebox from a worker thread safely - marshal to the main
+        thread and block until the user answers (or 60s pass)."""
+        box = {"v": None}
+        done = threading.Event()
+
+        def _ask():
+            try:
+                if kind == "yesnocancel":
+                    box["v"] = messagebox.askyesnocancel(title, message, parent=self)
+                else:
+                    box["v"] = messagebox.askyesno(title, message, parent=self)
+            finally:
+                done.set()
+        self.after(0, _ask)
+        done.wait(timeout=60)
+        return box["v"]
 
     def _precheck_before_download(self, urls):
         """1.7.4 pre-flight gate. F16 monthly data budget + F7 repeat-URL
@@ -4713,8 +4961,11 @@ class App(*_APP_BASES):
         # DOWNLOAD BEHAVIOUR (1.7.4 feature batch)
         # ============================================================ #
         self._section_header(scroll, "Download behaviour")
-        from gui.features_1_7_4 import build_download_behaviour_section
+        from gui.features_1_7_4 import build_download_behaviour_section, build_monitor_section
         build_download_behaviour_section(self, scroll).pack(fill="x", padx=5, pady=(0, 15))
+
+        self._sub_header(scroll, "Watch channels / playlists")
+        build_monitor_section(self, scroll).pack(fill="x", padx=5, pady=(0, 15))
 
         # ============================================================ #
         # ACCESSIBILITY
