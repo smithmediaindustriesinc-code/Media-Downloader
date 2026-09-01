@@ -82,6 +82,72 @@ def build_preset_bar(app, parent):
 
 
 # --------------------------------------------------------------------------- #
+# F11: Stats sub-tab (Media tab)
+# --------------------------------------------------------------------------- #
+def build_stats_subtab(app, tab):
+    from core.download_stats import summarize, human_bytes
+
+    tab.grid_columnconfigure(0, weight=1)
+    tab.grid_rowconfigure(1, weight=1)
+    top = ctk.CTkFrame(tab, fg_color="transparent")
+    top.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+    ctk.CTkLabel(top, text="Download statistics", font=app.font_label).pack(side="left")
+    body = ctk.CTkScrollableFrame(tab)
+    body.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+
+    def _bar_block(parent, title, mapping, fmt=str):
+        ctk.CTkLabel(parent, text=title, font=app.font_normal, anchor="w").pack(
+            anchor="w", pady=(10, 2))
+        if not mapping:
+            ctk.CTkLabel(parent, text="  (nothing yet)", font=app.font_small,
+                         text_color="gray55").pack(anchor="w")
+            return
+        top_val = max(mapping.values()) or 1
+        for k, v in mapping.items():
+            r = ctk.CTkFrame(parent, fg_color="transparent")
+            r.pack(fill="x", pady=1)
+            ctk.CTkLabel(r, text=str(k)[:28], font=app.font_small, width=180,
+                         anchor="w").pack(side="left")
+            bar = ctk.CTkProgressBar(r, height=10)
+            bar.pack(side="left", fill="x", expand=True, padx=6)
+            bar.set(v / top_val)
+            ctk.CTkLabel(r, text=fmt(v), font=app.font_small, width=80,
+                         anchor="e").pack(side="left")
+
+    def refresh():
+        for w in body.winfo_children():
+            w.destroy()
+        s = summarize()
+        grid = ctk.CTkFrame(body, fg_color="transparent")
+        grid.pack(fill="x")
+        cards = [
+            ("Downloads", str(s["total_items"])),
+            ("Succeeded", str(s["success"])),
+            ("Failed", str(s["failed"])),
+            ("Success rate", f"{s['success_rate'] * 100:.0f}%"),
+            ("Total data", human_bytes(s["total_bytes"])),
+            ("This month", human_bytes(s["month_bytes"])),
+        ]
+        for i, (label, val) in enumerate(cards):
+            c = ctk.CTkFrame(grid, fg_color=("gray92", "gray16"))
+            c.grid(row=i // 3, column=i % 3, padx=4, pady=4, sticky="ew")
+            grid.grid_columnconfigure(i % 3, weight=1)
+            ctk.CTkLabel(c, text=val, font=app.font_label).pack(padx=14, pady=(8, 0))
+            ctk.CTkLabel(c, text=label, font=app.font_small,
+                         text_color="gray60").pack(padx=14, pady=(0, 8))
+        _bar_block(body, "By type", s["by_type"])
+        _bar_block(body, "Data by format", s["by_ext"], fmt=human_bytes)
+        _bar_block(body, "Top sources", s["by_source"])
+        _bar_block(body, "Downloads per week", s["per_week"])
+
+    ctk.CTkButton(top, text="Refresh", width=90, font=app.font_small,
+                  fg_color="gray40", hover_color="gray30",
+                  command=refresh).pack(side="right")
+    refresh()
+    return refresh
+
+
+# --------------------------------------------------------------------------- #
 def build_download_behaviour_section(app, parent):
     box = ctk.CTkFrame(parent)
     box.grid_columnconfigure(0, weight=1)

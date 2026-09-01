@@ -141,6 +141,36 @@ def _is_cookie_access_error(exc):
     return "could not copy" in text and "cookie database" in text
 
 
+def classify_failure(exc):
+    """F8 (1.7.4): turn a download exception into (category, one-line fix hint)
+    for storage on the history/request entry and inline display later."""
+    if isinstance(exc, YouTubeBotDetectedError):
+        return ("Bot check", "YouTube wants sign-in verification. Set 'Cookies from browser' "
+                              "in Settings and wait a bit before retrying.")
+    if isinstance(exc, CookieAccessError):
+        return ("Cookies locked", "The chosen browser had its cookie database locked. "
+                                   "Close that browser and retry, or pick another.")
+    text = (str(getattr(exc, "original", "") or exc)).lower()
+    stage = getattr(exc, "stage", "")
+    if "403" in text or "forbidden" in text:
+        return ("Blocked (403)", "The server refused the request. Try cookies from a browser "
+                                  "you're signed into, or a different network.")
+    if "429" in text or "too many requests" in text:
+        return ("Rate limited", "You've hit the site's request limit. Raise the batch delay "
+                                 "in Settings and wait before retrying.")
+    if "404" in text or "not available" in text or "removed" in text or "private" in text:
+        return ("Unavailable", "The video is private, region-locked, deleted, or age-gated.")
+    if "timed out" in text or "timeout" in text or "connection" in text or "network" in text:
+        return ("Network", "A network error interrupted the download - check your connection "
+                            "and retry.")
+    if "requested format" in text or "no video formats" in text or stage == "format selection":
+        return ("Format", "The requested quality/format isn't offered for this video. "
+                           "Try 'Best' quality.")
+    if "ffmpeg" in text or stage == "verification":
+        return ("FFmpeg", "Merging/converting failed - reinstall FFmpeg from the Version tab.")
+    return ("Error", (str(getattr(exc, "original", "") or exc))[:160])
+
+
 MAX_DOWNLOAD_ATTEMPTS = 3
 
 

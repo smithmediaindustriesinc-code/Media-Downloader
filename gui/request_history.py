@@ -539,6 +539,7 @@ def _render_request_detail(app, container, request_id, list_refresh, back_callba
         ordered = []
         for url, item in items.items():
             sig = (item.get("status"), item.get("path"), item.get("name"), item.get("error"),
+                   item.get("error_category"), item.get("error_hint"),
                    selecting, selecting and item_selector.is_selected(url))
             cached = row_cache.get(url)
             if cached is not None and cached[1] == sig and cached[0].winfo_exists():
@@ -638,7 +639,9 @@ def _build_item_row(app, parent, request_id, url, item, render_callback, parent_
     _size = _file_size_or_none(item.get("path"))
     if _size is not None:
         size_str = format_file_size(_size)
-    if item.get("error"):
+    if item.get("error_category"):
+        detail += f"  -  [{item['error_category']}] {item.get('error', '')}"
+    elif item.get("error"):
         detail += f"  -  {item['error']}"
     elif item.get("path"):
         detail += f"  -  {item['path']}"
@@ -646,6 +649,10 @@ def _build_item_row(app, parent, request_id, url, item, render_callback, parent_
         detail += f"  -  {size_str}"
     ctk.CTkLabel(row, text=detail, font=app.font_small, text_color="gray60", anchor="w").grid(
         row=1, column=col + 1, sticky="w", pady=(0, 8))
+    if item.get("error_hint"):  # F8: one-line "what to do about it"
+        ctk.CTkLabel(row, text="→ " + item["error_hint"], font=app.font_small,
+                     text_color="#d68910", anchor="w", wraplength=560, justify="left").grid(
+            row=2, column=col + 1, sticky="w", pady=(0, 8))
 
     # Individual Copy Link/Retry stay available even with selecting on -
     # picking a subset for a bulk action doesn't take away the quick

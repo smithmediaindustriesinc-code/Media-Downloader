@@ -25,6 +25,7 @@ ctk.deactivate_automatic_dpi_awareness()
 from core.config import load_config, save_config
 from core.downloader import (Downloader, DownloadCancelled, DownloadStageError, YouTubeBotDetectedError,
                               CookieAccessError, PlaylistFetchTimeout, PlaylistFetchCancelled,
+                              classify_failure as _classify_failure,
                               fetch_info, fetch_media_info, fetch_playlist_info, fetch_download_size,
                               cleanup_partial_files, download_with_retry,
                               MAX_DOWNLOAD_ATTEMPTS,
@@ -2335,17 +2336,23 @@ class App(*_APP_BASES):
         except DownloadStageError as e:
             status = "Failed"
             error_msg = f"Failed during {e.stage}: {e.original}"
+            _cat, _hint = _classify_failure(e)
             self._threadsafe_log(error_msg, color="red")
             update_item(request_id, url, status="failed", error=error_msg,
+                        error_category=_cat, error_hint=_hint,
                         elapsed_seconds=self.downloader.elapsed_seconds())
         except Exception as e:
             status = "Failed"
             error_msg = f"Unexpected error: {e}"
+            _cat, _hint = _classify_failure(e)
             self._threadsafe_log(error_msg, color="red")
             update_item(request_id, url, status="failed", error=error_msg,
+                        error_category=_cat, error_hint=_hint,
                         elapsed_seconds=self.downloader.elapsed_seconds())
         finally:
-            update_entry(history_entry_id, name=unique_name, path=path, status=status)
+            update_entry(history_entry_id, name=unique_name, path=path, status=status,
+                         error=locals().get("error_msg") or None,
+                         error_category=locals().get("_cat") or None)
             self.after(0, self._refresh_history_tab)
             finish_request(request_id)
             self.after(0, lambda: self._set_downloading_state(False))
@@ -2539,13 +2546,17 @@ class App(*_APP_BASES):
             except DownloadStageError as e:
                 status = "Failed"
                 err = f"Failed during {e.stage}: {e.original}"
-                self._threadsafe_log(err, color="red")
-                update_item(request_id, entry_url, status="failed", error=err)
+                _fcat, _fhint = _classify_failure(e)
+                self._threadsafe_log(f"{err}  [{_fcat}: {_fhint}]", color="red")
+                update_item(request_id, entry_url, status="failed", error=err,
+                            error_category=_fcat, error_hint=_fhint)
             except Exception as e:
                 status = "Failed"
                 err = f"Unexpected error: {e}"
-                self._threadsafe_log(err, color="red")
-                update_item(request_id, entry_url, status="failed", error=str(e))
+                _fcat, _fhint = _classify_failure(e)
+                self._threadsafe_log(f"{err}  [{_fcat}: {_fhint}]", color="red")
+                update_item(request_id, entry_url, status="failed", error=str(e),
+                            error_category=_fcat, error_hint=_fhint)
             update_entry(history_entry_id, name=unique_name, path=path, status=status)
             self.after(0, self._refresh_history_tab)
             self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
@@ -3097,16 +3108,22 @@ class App(*_APP_BASES):
                 except DownloadStageError as e:
                     status = "Failed"
                     err = f"Failed during {e.stage} for {url}: {e.original}"
-                    self._threadsafe_log(err, color="red")
+                    _fcat, _fhint = _classify_failure(e)
+                    self._threadsafe_log(f"{err}  [{_fcat}: {_fhint}]", color="red")
                     update_item(request_id, url, status="failed", error=err,
+                                error_category=_fcat, error_hint=_fhint,
                                 elapsed_seconds=self.downloader.elapsed_seconds())
                 except Exception as e:
                     status = "Failed"
                     err = f"Unexpected error for {url}: {e}"
-                    self._threadsafe_log(err, color="red")
+                    _fcat, _fhint = _classify_failure(e)
+                    self._threadsafe_log(f"{err}  [{_fcat}: {_fhint}]", color="red")
                     update_item(request_id, url, status="failed", error=err,
+                                error_category=_fcat, error_hint=_fhint,
                                 elapsed_seconds=self.downloader.elapsed_seconds())
-                update_entry(history_entry_id, name=unique_name, path=path, status=status)
+                update_entry(history_entry_id, name=unique_name, path=path, status=status,
+                             error=locals().get("err") if status == "Failed" else None,
+                             error_category=locals().get("_fcat") if status == "Failed" else None)
                 self.after(0, self._refresh_history_tab)
                 self._batch_items_remaining = max(0, self._batch_items_remaining - 1)
                 self._batch_bytes_done += self._batch_size_by_url.get(url, 0)
@@ -3347,8 +3364,11 @@ class App(*_APP_BASES):
         media_tabview.grid(row=0, column=0, sticky="nsew")
         playlists_tab = media_tabview.add("Playlists")
         library_tab = media_tabview.add("Library")
+        stats_tab = media_tabview.add("Stats")
         self._build_playlists_subtab(playlists_tab)
         self._build_library_subtab(library_tab)
+        from gui.features_1_7_4 import build_stats_subtab
+        self._refresh_stats_subtab = build_stats_subtab(self, stats_tab)
 
     def _build_playlists_subtab(self, tab):
         tab.grid_columnconfigure(1, weight=1)
