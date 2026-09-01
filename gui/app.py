@@ -3990,6 +3990,10 @@ class App(*_APP_BASES):
                           hover_color="gray30",
                           command=lambda p=item["path"]: self._open_or_warn(os.path.dirname(p))).grid(
                 row=0, column=2, rowspan=2, padx=(0, 6))
+            ctk.CTkButton(row, text="Tools", width=60, font=self.font_small, fg_color="gray40",
+                          hover_color="gray30",
+                          command=lambda p=item["path"], n=item["name"]: self._library_file_tools(p, n)).grid(
+                row=0, column=3, rowspan=2, padx=(0, 6))
             ctk.CTkButton(row, text="Archive", width=70, font=self.font_small, fg_color="gray40",
                           hover_color="gray30",
                           command=lambda p=item["path"], n=item["name"]: self._archive_library_file(p, n)).grid(
@@ -3999,6 +4003,12 @@ class App(*_APP_BASES):
             delete_btn.configure(command=lambda p=item["path"], n=item["name"], b=delete_btn:
                                   self._delete_library_file_clicked(p, n, b))
             delete_btn.grid(row=0, column=5, rowspan=2, padx=(0, 10))
+
+    def _library_file_tools(self, path, name):
+        """F13 + F14: a small popup to apply a tag template or convert one
+        library file to another format."""
+        from gui.features_1_7_4 import open_file_tools_dialog
+        open_file_tools_dialog(self, path, name)
 
     def _archive_library_file(self, path, name):
         """Moves this file - and any other file sharing the same base

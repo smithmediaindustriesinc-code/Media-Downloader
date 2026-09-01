@@ -30,6 +30,117 @@ def _apply_runtime(app):
 
 
 # --------------------------------------------------------------------------- #
+# F13 + F14: per-file tools popup (Library tab)
+# --------------------------------------------------------------------------- #
+def open_file_tools_dialog(app, path, name):
+    import os
+    from core import tag_templates
+    from core.format_converter import ALL_TARGETS, convert
+
+    win = ctk.CTkToplevel(app)
+    win.title("File tools")
+    win.geometry("520x360")
+    win.transient(app)
+    win.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(win, text=name, font=app.font_label, wraplength=480, anchor="w",
+                 justify="left").grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 4))
+
+    # ---- F13: apply a tag template ---------------------------------- #
+    tf = ctk.CTkFrame(win)
+    tf.grid(row=1, column=0, sticky="ew", padx=14, pady=6)
+    tf.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(tf, text="Apply tag template", font=app.font_normal).grid(
+        row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(8, 2))
+    tmpl_var = ctk.StringVar(value=(tag_templates.template_names(app.cfg) or ["(none)"])[0])
+    tmpl_menu = ctk.CTkOptionMenu(tf, variable=tmpl_var, width=180, font=app.font_small,
+                                  values=tag_templates.template_names(app.cfg) or ["(none)"])
+    tmpl_menu.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
+    status = ctk.CTkLabel(tf, text="", font=app.font_small, text_color="gray60")
+    status.grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 8))
+
+    def apply_tmpl():
+        t = tag_templates.get_template(app.cfg, tmpl_var.get())
+        if not t:
+            status.configure(text="No template selected - create one first.")
+            return
+        ok, msg = tag_templates.apply_template(path, t)
+        status.configure(text=msg, text_color="#2fa84f" if ok else "#c0392b")
+
+    def new_tmpl():
+        _template_editor(app, on_saved=lambda: tmpl_menu.configure(
+            values=tag_templates.template_names(app.cfg) or ["(none)"]))
+
+    ctk.CTkButton(tf, text="Apply", width=80, font=app.font_small, command=apply_tmpl).grid(
+        row=1, column=1, padx=6)
+    ctk.CTkButton(tf, text="New / edit templates…", width=170, font=app.font_small,
+                  fg_color="gray40", hover_color="gray30", command=new_tmpl).grid(row=1, column=2)
+
+    # ---- F14: convert format --------------------------------------- #
+    cf = ctk.CTkFrame(win)
+    cf.grid(row=2, column=0, sticky="ew", padx=14, pady=6)
+    cf.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(cf, text="Convert to another format", font=app.font_normal).grid(
+        row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(8, 2))
+    cur = os.path.splitext(path)[1].lstrip(".").lower()
+    targets = [t for t in ALL_TARGETS if t != cur]
+    fmt_var = ctk.StringVar(value=targets[0] if targets else "mp3")
+    ctk.CTkOptionMenu(cf, variable=fmt_var, values=targets, width=120, font=app.font_small).grid(
+        row=1, column=0, sticky="w", padx=10, pady=(0, 8))
+    cstatus = ctk.CTkLabel(cf, text="", font=app.font_small, text_color="gray60", wraplength=360,
+                           justify="left")
+    cstatus.grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 8))
+
+    def do_convert():
+        cstatus.configure(text="Converting…", text_color="gray60")
+        win.update_idletasks()
+        ok, out, msg = convert(path, fmt_var.get(), log_cb=lambda m: None)
+        if ok:
+            cstatus.configure(text=f"Done → {os.path.basename(out)}", text_color="#2fa84f")
+            app._refresh_library_tab()
+        else:
+            cstatus.configure(text=msg, text_color="#c0392b")
+
+    ctk.CTkButton(cf, text="Convert", width=90, font=app.font_small, command=do_convert).grid(
+        row=1, column=1, padx=6)
+    win.after(60, win.lift)
+
+
+def _template_editor(app, existing_name=None, on_saved=None):
+    from core import tag_templates
+    from core.config import save_config
+    win = ctk.CTkToplevel(app)
+    win.title("Tag template")
+    win.geometry("420x360")
+    win.transient(app)
+    win.grid_columnconfigure(1, weight=1)
+    t = tag_templates.get_template(app.cfg, existing_name) if existing_name else {}
+    fields = [("name", "Name"), ("artist", "Artist"), ("album", "Album"),
+              ("album_artist", "Album artist"), ("genre", "Genre"),
+              ("year", "Year"), ("comment", "Comment")]
+    vs = {}
+    for i, (key, label) in enumerate(fields):
+        ctk.CTkLabel(win, text=label, font=app.font_small).grid(row=i, column=0, sticky="e", padx=8, pady=4)
+        v = ctk.StringVar(value=str(t.get(key, "") or ""))
+        ctk.CTkEntry(win, textvariable=v, font=app.font_normal).grid(row=i, column=1, sticky="ew", padx=8, pady=4)
+        vs[key] = v
+
+    def save():
+        try:
+            tag_templates.save_template(app.cfg, {k: v.get() for k, v in vs.items()})
+        except ValueError as e:
+            messagebox.showerror("Tag template", str(e), parent=win)
+            return
+        save_config(app.cfg)
+        if on_saved:
+            on_saved()
+        win.destroy()
+
+    ctk.CTkButton(win, text="Save", font=app.font_normal, command=save).grid(
+        row=len(fields), column=0, columnspan=2, pady=12, padx=8, sticky="ew")
+    win.after(60, win.lift)
+
+
+# --------------------------------------------------------------------------- #
 # F1: preset bar for the Download tab
 # --------------------------------------------------------------------------- #
 def build_preset_bar(app, parent):
