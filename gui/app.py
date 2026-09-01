@@ -1212,18 +1212,38 @@ class App(*_APP_BASES):
         if not self._batch_urls:
             ctk.CTkLabel(self.batch_dynamic_list_frame, text="No URLs yet - paste some above.",
                          font=self.font_small, text_color="gray60").pack(pady=10)
+        n = len(self._batch_urls)
         for i, url in enumerate(self._batch_urls):
             row = ctk.CTkFrame(self.batch_dynamic_list_frame, fg_color="transparent")
             row.pack(fill="x", pady=1)
             ctk.CTkButton(row, text="\u2715", width=24, font=self.font_small, fg_color="#a13333",
                           hover_color="#7d2626", command=lambda i=i: self._remove_batch_url(i)).pack(
                 side="left", padx=(0, 6))
-            ctk.CTkLabel(row, text=url, font=self.font_small, text_color="gray60", anchor="w").pack(
-                side="left", fill="x", expand=True)
+            # F3 (1.7.4): reorder controls - bump an urgent item up the queue
+            ctk.CTkButton(row, text="\u2912", width=22, font=self.font_small, fg_color="gray35",
+                          hover_color="gray25", state=("disabled" if i == 0 else "normal"),
+                          command=lambda i=i: self._move_batch_url(i, 0)).pack(side="left", padx=(0, 2))
+            ctk.CTkButton(row, text="\u25b2", width=22, font=self.font_small, fg_color="gray35",
+                          hover_color="gray25", state=("disabled" if i == 0 else "normal"),
+                          command=lambda i=i: self._move_batch_url(i, i - 1)).pack(side="left", padx=(0, 2))
+            ctk.CTkButton(row, text="\u25bc", width=22, font=self.font_small, fg_color="gray35",
+                          hover_color="gray25", state=("disabled" if i == n - 1 else "normal"),
+                          command=lambda i=i: self._move_batch_url(i, i + 1)).pack(side="left", padx=(0, 6))
+            ctk.CTkLabel(row, text=f"{i + 1}. {url}", font=self.font_small, text_color="gray60",
+                         anchor="w").pack(side="left", fill="x", expand=True)
         self.batch_undo_btn.configure(state="normal" if self._batch_undo_stack else "disabled")
         self.batch_undo_count_label.configure(
             text=f"{len(self._batch_undo_stack)} removed" if self._batch_undo_stack else "")
         self._update_batch_start_btn()
+
+    def _move_batch_url(self, from_idx, to_idx):
+        """F3: reorder the dynamic batch queue."""
+        urls = self._batch_urls
+        if not (0 <= from_idx < len(urls)):
+            return
+        to_idx = max(0, min(len(urls) - 1, to_idx))
+        urls.insert(to_idx, urls.pop(from_idx))
+        self._refresh_batch_dynamic_list()
 
     def _batch_queued_count(self):
         """How many URLs are queued right now, in whichever batch mode is on."""
