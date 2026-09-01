@@ -106,6 +106,42 @@ organized and how to change or add features yourself.
 
 ## Changelog
 
+### 1.7.4
+
+A big feature release — 16 new things (pre-release; please test).
+
+- **Download presets** — save named bundles of quality/format/subs settings,
+  swap them from a dropdown on the Download tab.
+- **Speed limiter** — cap download speed (Settings → Download behaviour).
+- **Batch queue reorder** — move-to-top / up / down on each queued item.
+- **File organization** — auto-move finished files into sub-folders by
+  source / date / resolution / a custom pattern.
+- **Scheduled downloads** — "Schedule…" a queue for later; it survives a
+  restart and starts itself at the set time.
+- **Skip rules** — skip items in a batch/playlist by duration, size,
+  resolution, or "already in my Library".
+- **Repeat-download warning** — warns before re-downloading a URL that's
+  already in History (with an "open the existing file" option).
+- **Better failure reasons** — failed downloads are categorised (bot check,
+  cookies locked, 403, rate-limited, unavailable, network, format, FFmpeg)
+  with a one-line fix, shown in Request History.
+- **Channel / playlist monitor** — subscribe to a channel or playlist;
+  it's checked periodically and on startup for new uploads (auto-download
+  or just notify).
+- **Incremental playlist sync** — re-download a playlist and choose "only
+  the new items" instead of everything again.
+- **Stats dashboard** — a new "Stats" sub-tab on the Media tab (totals,
+  success rate, data used this month, breakdowns by type / format / source).
+- **History tags** — tag any history entry and filter the list by tag.
+- **Tag templates** — save artist/album/genre presets and bulk-apply them
+  to non-Spotify audio (Library → Tools).
+- **Format conversion** — convert an already-downloaded file to another
+  format with the bundled FFmpeg, no re-download (Library → Tools).
+- **Quality by length** — rules that pick video quality from the video's
+  duration.
+- **Monthly data budget** — warn, or pause new downloads, when you hit a
+  GB cap for the month.
+
 ### 1.7.3.1
 
 Fixes and a round of optimizations on top of 1.7.3 (still a pre-release).

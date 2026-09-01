@@ -9,7 +9,7 @@ show a "pre-release" badge (#V2). Flip to False in the commit that merges
 to stable for a proper release.
 """
 
-APP_VERSION = "1.7.3.1"
-APP_RELEASE_DATE = "2026-08-30"
+APP_VERSION = "1.7.4"
+APP_RELEASE_DATE = "2026-09-01"
 APP_PUBLISHER = "Smith Media Industries inc."
 APP_IS_PRERELEASE = True
